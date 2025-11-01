@@ -30,6 +30,26 @@
         fi
       loop: "{{ dc_ctids }}"
 
+    - name: Falls externe DNS-Auflösung im CT scheitert, temporäre resolv.conf setzen
+      ansible.builtin.shell: |
+        set -e
+        if ! getent hosts deb.debian.org >/dev/null 2>&1; then
+          cp -a /etc/resolv.conf /etc/resolv.conf.bootstrap.bak || true
+          cat > /etc/resolv.conf <<'EOF'
+# temporary for bootstrap (will be reverted later)
+search {{ ad_domain }}
+nameserver 1.1.1.1
+nameserver 9.9.9.9
+EOF
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ dc_ctids }}"
+      loop_control:
+        loop_var: item
+      delegate_to: "{{ inventory_hostname }}"
+      changed_when: false
+
     - name: Warte auf Netzwerk im CT (DNS-Auflösung extern)
       ansible.builtin.shell: |
         pct exec {{ item }} -- bash -lc 'getent hosts deb.debian.org'
@@ -103,6 +123,27 @@
       register: testparm_out
       changed_when: false
       loop: "{{ dc_ctids }}"
+
+    - name: resolv.conf zurück auf AD-intern (falls Bootstrap-Datei vorhanden)
+      ansible.builtin.shell: |
+        set -e
+        if [ -f /etc/resolv.conf.bootstrap.bak ]; then
+          # auf DCs setzen wir wieder die geplante Reihenfolge:
+          # 1) zmb-ad (241)  2) zmb-ad-join (242)  3) optional extern
+          cat > /etc/resolv.conf <<'EOF'
+search {{ ad_domain }}
+nameserver 192.168.100.241
+nameserver 192.168.100.242
+EOF
+          rm -f /etc/resolv.conf.bootstrap.bak
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ dc_ctids }}"
+      loop_control:
+        loop_var: item
+      delegate_to: "{{ inventory_hostname }}"
+      changed_when: false
 
     - name: Health-Report in CT-Log schreiben
       ansible.builtin.shell: |
