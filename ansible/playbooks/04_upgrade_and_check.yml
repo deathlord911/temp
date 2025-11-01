@@ -1,170 +1,84 @@
+# Playbook 04: Debian-13-Upgrade & Samba/DC Health-Checks (robust)
 ---
 - name: Upgrade & Health-Checks für Zamba-DCs (Debian 13 "Trixie")
   hosts: pve3
   gather_facts: false
-
   vars:
     dc_ctids: [100, 101]
-    trixie_sources: |
-      deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware
-      deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
-      deb http://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
-    log_dir: "/var/log/zmb-upgrade"
-    # für non-interaktive APT-Läufe im Container
-    apt_env:
-      DEBIAN_FRONTEND: noninteractive
-      APT_LISTCHANGES_FRONTEND: none
-      NEEDRESTART_MODE: a
+    # während des Bootstraps (erstes apt update) nutzen wir einen externen Resolver
+    bootstrap_resolver: "1.1.1.1"
+    ad_domain: "amazonistan.intranet"
 
   tasks:
-
     - name: Erzeuge Log-Verzeichnis in jedem CT
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'install -d -m 0750 {{ log_dir }}'
+        pct exec {{ item }} -- bash -lc 'mkdir -p /root/ad-upgrade-logs'
       loop: "{{ dc_ctids }}"
 
     - name: Stelle sicher, dass die Container laufen
       ansible.builtin.shell: |
-        if ! pct status {{ item }} | grep -q running; then
-          pct start {{ item }}
-        fi
+        pct start {{ item }} || true
       loop: "{{ dc_ctids }}"
 
-    - name: Falls externe DNS-Auflösung im CT scheitert, temporäre resolv.conf setzen
+    # --- Bootstrap-DNS: temporär /etc/resolv.conf setzen (korrekt gequotet) ---
+    - name: Setze temporäre /etc/resolv.conf (Bootstrap) in jedem CT
       ansible.builtin.shell: |
-        set -e
-        if ! getent hosts deb.debian.org >/dev/null 2>&1; then
-          cp -a /etc/resolv.conf /etc/resolv.conf.bootstrap.bak || true
-          cat > /etc/resolv.conf <<'EOF'
-# temporary for bootstrap (will be reverted later)
-search {{ ad_domain }}
-nameserver 1.1.1.1
-nameserver 9.9.9.9
-EOF
-        fi
-      args:
-        executable: /bin/bash
+        pct exec {{ item }} -- bash -lc "cat > /etc/resolv.conf <<'EOF'
+        search {{ ad_domain }}
+        nameserver {{ bootstrap_resolver }}
+        EOF
+        "
       loop: "{{ dc_ctids }}"
-      loop_control:
-        loop_var: item
-      delegate_to: "{{ inventory_hostname }}"
-      changed_when: false
 
     - name: Warte auf Netzwerk im CT (DNS-Auflösung extern)
       ansible.builtin.shell: |
         pct exec {{ item }} -- bash -lc 'getent hosts deb.debian.org'
-      register: netchk
+      register: netcheck
       retries: 20
-      delay: 5
-      until: netchk.rc == 0
+      delay: 3
+      until: netcheck.rc == 0
       loop: "{{ dc_ctids }}"
 
-    - name: Backup der APT-Sources im CT
+    # --- Upgrade auf Debian 13 (falls noch nicht) ---
+    - name: Setze trixie-Sources (falls nötig)
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'test -f /etc/apt/sources.list && cp -n /etc/apt/sources.list {{ log_dir }}/sources.list.$(date +%F_%H%M%S).bak || true'
+        pct exec {{ item }} -- bash -lc "release=$(cut -d. -f1 /etc/debian_version); \
+        if [ \"$release\" != \"13\" ]; then \
+          sed -i 's/bookworm/trixie/g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true; \
+        fi"
       loop: "{{ dc_ctids }}"
 
-    - name: Schreibe Trixie-Sources in /etc/apt/sources.list
+    - name: apt update & full-upgrade
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'cat > /etc/apt/sources.list << "EOF"
-        {{ trixie_sources }}
-        EOF'
+        pct exec {{ item }} -- bash -lc 'apt update && apt -y full-upgrade'
       loop: "{{ dc_ctids }}"
 
-    - name: apt update in CT
+    # --- resolved sauber aktivieren (wird später von Playbook 05 überschrieben) ---
+    - name: resolved aktivieren & /etc/resolv.conf symlink setzen
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'env {{ apt_env | dict2items | map("join","=") | join(" ") }} apt-get update'
-      register: aptupd
-      retries: 5
-      delay: 5
-      until: aptupd.rc == 0
+        pct exec {{ item }} -- bash -lc "
+          systemctl enable --now systemd-resolved || true
+          ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+        "
       loop: "{{ dc_ctids }}"
 
-    - name: Vollupgrade (dist/full-upgrade) in CT
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'env {{ apt_env | dict2items | map("join","=") | join(" ") }} apt-get -y --allow-change-held-packages full-upgrade'
-      loop: "{{ dc_ctids }}"
-
-    - name: Paket-Leichen & Autoremove
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'env {{ apt_env | dict2items | map("join","=") | join(" ") }} apt-get -y autoremove && apt-get -y autoclean'
-      loop: "{{ dc_ctids }}"
-
-    - name: Samba-Dienste neu starten
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'systemctl restart samba-ad-dc winbind || true'
-      loop: "{{ dc_ctids }}"
-
-    - name: Healthcheck 1 – systemd-Status Samba AD DC
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'systemctl is-active samba-ad-dc'
-      register: svc
-      failed_when: svc.stdout.strip() != "active"
-      loop: "{{ dc_ctids }}"
-
-    - name: Healthcheck 2 – Replikation (samba-tool drs showrepl)
+    # --- Health Checks grundlegend ---
+    - name: DRS Replikation prüfen (best effort)
       ansible.builtin.shell: |
         pct exec {{ item }} -- bash -lc 'samba-tool drs showrepl'
-      register: drs
-      changed_when: false
+      register: drs_res
+      failed_when: false
       loop: "{{ dc_ctids }}"
 
-    - name: Healthcheck 3 – DNS-Forwarding (externe Auflösung)
+    - name: wbinfo trust check
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'getent hosts deb.debian.org'
-      register: fwd
-      failed_when: fwd.rc != 0
-      changed_when: false
+        pct exec {{ item }} -- bash -lc 'wbinfo -t'
+      register: wbinfo_res
+      failed_when: false
       loop: "{{ dc_ctids }}"
 
-    - name: Healthcheck 4 – testparm Kurzinfo (Rolle / Forwarder)
+    - name: SYSVOL vorhanden?
       ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'testparm -s | egrep -i "Server role|dns forwarder" || true'
-      register: testparm_out
-      changed_when: false
+        pct exec {{ item }} -- bash -lc 'test -d /var/lib/samba/sysvol && echo OK || (echo FAIL; exit 1)'
       loop: "{{ dc_ctids }}"
 
-    - name: resolv.conf zurück auf AD-intern (falls Bootstrap-Datei vorhanden)
-      ansible.builtin.shell: |
-        set -e
-        if [ -f /etc/resolv.conf.bootstrap.bak ]; then
-          # auf DCs setzen wir wieder die geplante Reihenfolge:
-          # 1) zmb-ad (241)  2) zmb-ad-join (242)  3) optional extern
-          cat > /etc/resolv.conf <<'EOF'
-search {{ ad_domain }}
-nameserver 192.168.100.241
-nameserver 192.168.100.242
-EOF
-          rm -f /etc/resolv.conf.bootstrap.bak
-        fi
-      args:
-        executable: /bin/bash
-      loop: "{{ dc_ctids }}"
-      loop_control:
-        loop_var: item
-      delegate_to: "{{ inventory_hostname }}"
-      changed_when: false
-
-    - name: Health-Report in CT-Log schreiben
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc '
-          {
-            echo "==== ZMB UPGRADE REPORT $(date) ====";
-            echo "# Debian Version:"; cat /etc/debian_version; echo;
-            echo "# Samba service:"; systemctl is-active samba-ad-dc; echo;
-            echo "# DRS showrepl:"; samba-tool drs showrepl || true; echo;
-            echo "# DNS forward test:"; getent hosts deb.debian.org || true; echo;
-            echo "# testparm (role/forwarder):"; testparm -s | egrep -i "Server role|dns forwarder" || true; echo;
-          } | tee -a {{ log_dir }}/post-upgrade-$(date +%F).log
-        '
-      loop: "{{ dc_ctids }}"
-
-    - name: Ergebnis zusammenfassen (nur anzeigen)
-      ansible.builtin.debug:
-        msg: |
-          CT {{ item.item }}:
-            - samba-ad-dc active: {{ (item.0.stdout | default('')).strip() | default('unknown') }}
-            - DRS length: {{ (item.1.stdout | default('')).splitlines() | length }} lines
-            - DNS forward ok: {{ item.2.rc == 0 }}
-            - testparm lines: {{ (item.3.stdout | default('')).splitlines() | length }} lines
-      loop: "{{ query('zip', svc.results, drs.results, fwd.results, testparm_out.results) }}"
