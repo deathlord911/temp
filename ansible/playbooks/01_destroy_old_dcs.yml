@@ -1,0 +1,14 @@
+---
+- name: (Optional) Alte DC-Container entfernen
+  hosts: controller
+  gather_facts: false
+  tasks:
+    - name: Stoppe und lösche alte DC-Container
+      ansible.builtin.shell: |
+        for id in {{ old_dc_ctids | join(' ') }}; do
+          pct shutdown $id --forceStop 1 --timeout 30 || true
+          pct stop $id --skiplock 1 || true
+          pct destroy $id --purge 1 || true
+        done
+      args:
+        executable: /bin/bash

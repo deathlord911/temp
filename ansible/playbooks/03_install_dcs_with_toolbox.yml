@@ -1,0 +1,22 @@
+---
+- name: Installiere DC-Container via zamba-lxc-toolbox (CT 100/101)
+  hosts: controller
+  gather_facts: false
+  tasks:
+    - name: zmb-ad installieren
+      ansible.builtin.shell: |
+        cd /root/zamba-lxc-toolbox
+        ./install.sh -s zmb-ad -i 100 -c /root/zamba-conf/zmb-ad.new.conf <<'EOF'
+y
+EOF
+      args:
+        executable: /bin/bash
+
+    - name: zmb-ad-join installieren
+      ansible.builtin.shell: |
+        cd /root/zamba-lxc-toolbox
+        ./install.sh -s zmb-ad-join -i 101 -c /root/zamba-conf/zmb-ad-join.new.conf <<'EOF'
+y
+EOF
+      args:
+        executable: /bin/bash

@@ -1,0 +1,7 @@
+*.retry
+*.zip
+__pycache__/
+*.swp
+*.swo
+*.log
+.cache/

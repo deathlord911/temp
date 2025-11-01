@@ -1,0 +1,24 @@
+---
+- name: Erzeuge zamba-Konfigurationsdateien für beide DCs
+  hosts: controller
+  gather_facts: false
+  vars:
+    outdir: /root/zamba-conf
+  tasks:
+    - name: Output-Verzeichnis anlegen
+      ansible.builtin.file:
+        path: "{{ outdir }}"
+        state: directory
+        mode: "0750"
+
+    - name: zmb-ad.conf erstellen
+      ansible.builtin.template:
+        src: zmb-ad.conf.j2
+        dest: "{{ outdir }}/zmb-ad.new.conf"
+        mode: "0640"
+
+    - name: zmb-ad-join.conf erstellen
+      ansible.builtin.template:
+        src: zmb-ad-join.conf.j2
+        dest: "{{ outdir }}/zmb-ad-join.new.conf"
+        mode: "0640"

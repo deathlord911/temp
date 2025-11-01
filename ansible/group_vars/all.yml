@@ -1,0 +1,40 @@
+toolbox_path: /root/zamba-lxc-toolbox
+lxc_template_storage: cephfs
+lxc_rootfs_storage: raidpool
+lxc_sharefs_storage: raidpool
+lxc_bridge: vmbr3
+lxc_vlan: "100"
+lxc_mem: 4096
+lxc_swap: 1024
+lxc_threads: 0
+lxc_timezone: Europe/Berlin
+lxc_locale: de_DE.UTF-8
+lxc_toolset: "vim htop net-tools dnsutils sysstat mc"
+lxc_pwd: "Start123"
+lxc_authorized_key: "~/.ssh/authorized_keys"
+zmb_realm: "AMAZONISTAN.INTRANET"
+zmb_domain: "AMAZONISTAN"
+zmb_admin_user: "administrator"
+zmb_admin_pass: "dArkn3$s"
+zmb_share: "share"
+zmb_ad:
+  vmid: 100
+  hostname: "zmb-ad"
+  ip_cidr: "192.168.100.241/24"
+  gw: "192.168.100.1"
+  dns_install: "1.1.1.1"
+  dns_runtime: "192.168.100.241"
+zmb_ad_join:
+  vmid: 101
+  hostname: "zmb-ad-join"
+  ip_cidr: "192.168.100.242/24"
+  gw: "192.168.100.1"
+  dns_install: "192.168.100.241"
+  dns_runtime: "192.168.100.241"
+lxc_rootfs_size_gb: "32"
+lxc_sharefs_size_gb: "256"
+old_dc_ctids: [100, 101]
+cluster_nodes:
+  - { name: "pve1", ip: "192.168.5.11" }
+  - { name: "pve2", ip: "192.168.5.12" }
+  - { name: "pve3", ip: "192.168.5.13" }
