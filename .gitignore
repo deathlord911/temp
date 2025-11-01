@@ -1,7 +1,6 @@
+# Logs & Reports
+reports/logs/*.log
+
+# Python/Ansible Kleinkram
 *.retry
-*.zip
 __pycache__/
-*.swp
-*.swo
-*.log
-.cache/
