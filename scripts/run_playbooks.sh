@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Immer unsere lokale Config nutzen
-export ANSIBLE_CONFIG="$(pwd)/ansible/ansible.cfg"
+export ANSIBLE_CONFIG="$(pwd)/ansible.cfg"
 
 # harte Defaults: kein community.general.yaml mehr laden
 export ANSIBLE_STDOUT_CALLBACK=default
@@ -28,10 +28,8 @@ run() {
   local logfile="${LOGDIR}/${TIMESTAMP}_${name}.log"
 
   echo ">>> RUN ${playbook}"
-  # - ANSIBLE_STDOUT_CALLBACK=yaml für gut lesbare Ausgabe
   # - pipefail sorgt dafür, dass Fehler in ansible-playbook den Exitcode erhalten
   # - tee schreibt live und in die Datei
-  ANSIBLE_STDOUT_CALLBACK=yaml \
   ansible-playbook -i "$INV" "$playbook" 2>&1 | tee "$logfile"
 
   echo ">>> DONE ${playbook}  (log: ${logfile})"
