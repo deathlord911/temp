@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export ANSIBLE_STDOUT_CALLBACK=default
+export ANSIBLE_CALLBACKS_ENABLED=profile_tasks
 
 # immer relativ zum Repo-Root ausführen
 cd "$(dirname "$0")/.."
