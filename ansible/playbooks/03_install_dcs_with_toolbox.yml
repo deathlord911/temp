@@ -1,22 +1,39 @@
 ---
-- name: Installiere DC-Container via zamba-lxc-toolbox (CT 100/101)
-  hosts: controller
+- name: Installiere Zamba DCs mit der lxc-toolbox (auto-confirm)
+  hosts: pve3
   gather_facts: false
+  vars:
+    toolbox_dir: /root/zamba-lxc-toolbox
+    conf_dir: /root/zamba-conf
   tasks:
-    - name: zmb-ad installieren
-      ansible.builtin.shell: |
-        cd /root/zamba-lxc-toolbox
-        ./install.sh -s zmb-ad -i 100 -c /root/zamba-conf/zmb-ad.new.conf <<'EOF'
-y
-EOF
-      args:
-        executable: /bin/bash
+    - name: Prüfe, ob die Toolbox vorhanden ist
+      ansible.builtin.stat:
+        path: "{{ toolbox_dir }}/install.sh"
+      register: tb
 
-    - name: zmb-ad-join installieren
+    - name: Abbrechen, falls Toolbox fehlt
+      ansible.builtin.fail:
+        msg: "Toolbox nicht gefunden unter {{ toolbox_dir }} – bitte zuerst clonen/aktualisieren."
+      when: not tb.stat.exists
+
+    - name: Installiere zmb-ad (CT 100) – Prompts mit Enter bestätigen
       ansible.builtin.shell: |
-        cd /root/zamba-lxc-toolbox
-        ./install.sh -s zmb-ad-join -i 101 -c /root/zamba-conf/zmb-ad-join.new.conf <<'EOF'
-y
-EOF
+        set -euo pipefail
+        cd "{{ toolbox_dir }}"
+        { printf '\n%.0s' {1..20}; } | ./install.sh -s zmb-ad -i 100 -c "{{ conf_dir }}/zmb-ad.new.conf"
       args:
         executable: /bin/bash
+        creates: "/etc/pve/lxc/100.conf"
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Installiere zmb-ad-join (CT 101) – Prompts mit Enter bestätigen
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd "{{ toolbox_dir }}"
+        { printf '\n%.0s' {1..20}; } | ./install.sh -s zmb-ad-join -i 101 -c "{{ conf_dir }}/zmb-ad-join.new.conf"
+      args:
+        executable: /bin/bash
+        creates: "/etc/pve/lxc/101.conf"
+      environment:
+        DEBIAN_FRONTEND: noninteractive
