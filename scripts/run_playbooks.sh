@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Immer unsere lokale Config nutzen
+export ANSIBLE_CONFIG="$(pwd)/ansible/ansible.cfg"
+
+# harte Defaults: kein community.general.yaml mehr laden
 export ANSIBLE_STDOUT_CALLBACK=default
 export ANSIBLE_CALLBACKS_ENABLED=profile_tasks
+unset ANSIBLE_LOAD_CALLBACK_PLUGINS
+unset ANSIBLE_CALLBACK_PLUGINS
 
 # immer relativ zum Repo-Root ausführen
 cd "$(dirname "$0")/.."
