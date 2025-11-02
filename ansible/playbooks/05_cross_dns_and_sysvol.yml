@@ -44,6 +44,51 @@
       loop_control:
         label: "{{ item.ctid }}"
 
+    # --- resolv.conf ABSICHERN, falls KEIN systemd-resolved vorhanden ist ---
+    # DC-A: resolv.conf soll DC-B (Primary) + Fallback enthalten
+    - name: Ensure resolv.conf on DC-A (peer=B, fallback)
+      ansible.builtin.shell: |
+        pct exec {{ dc_a.ctid }} -- bash -lc '
+          set -e
+          chattr -i /etc/resolv.conf 2>/dev/null || true
+          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
+          want=$(cat <<EOF
+    search amazonistan.intranet
+    nameserver {{ dc_b.ip }}
+    nameserver {{ dns_fallback }}
+    EOF
+    )
+          if [ -f /etc/resolv.conf ] && printf "%s\n" "$want" | cmp -s - /etc/resolv.conf; then
+            exit 0
+          fi
+          install -m 0644 /dev/null /etc/resolv.conf
+          printf "%s\n" "$want" > /etc/resolv.conf
+        '
+      changed_when: true
+      when: has_resolved.results[0].stdout.strip() == "no"
+
+    # DC-B: resolv.conf soll DC-A (Primary) + Fallback enthalten
+    - name: Ensure resolv.conf on DC-B (peer=A, fallback)
+      ansible.builtin.shell: |
+        pct exec {{ dc_b.ctid }} -- bash -lc '
+          set -e
+          chattr -i /etc/resolv.conf 2>/dev/null || true
+          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
+          want=$(cat <<EOF
+    search amazonistan.intranet
+    nameserver {{ dc_a.ip }}
+    nameserver {{ dns_fallback }}
+    EOF
+    )
+          if [ -f /etc/resolv.conf ] && printf "%s\n" "$want" | cmp -s - /etc/resolv.conf; then
+            exit 0
+          fi
+          install -m 0644 /dev/null /etc/resolv.conf
+          printf "%s\n" "$want" > /etc/resolv.conf
+        '
+      changed_when: true
+      when: has_resolved.results[1].stdout.strip() == "no"
+
     # --- Mit systemd-resolved -----------------------------------------------
     - name: Cross-DNS via systemd-resolved (DC-A → DC-B)
       ansible.builtin.shell: |
