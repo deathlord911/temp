@@ -1,0 +1,80 @@
+- name: SYSVOL Key-Setup & Rsync
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Ensure openssh-client & rsync installed (both DCs)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          set -e
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-client rsync
+        '
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+
+    - name: Ensure SSH key on each DC (id_ed25519)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          test -f /root/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
+          chmod 700 /root/.ssh
+          chmod 600 /root/.ssh/id_ed25519*
+        '
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+
+    - name: Fetch public keys from DCs
+      ansible.builtin.shell: "pct exec {{ item.ctid }} -- bash -lc 'cat /root/.ssh/id_ed25519.pub'"
+      register: pubkeys
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+      changed_when: false
+
+    - name: Distribute pubkey A -> B (authorized_keys)
+      ansible.builtin.shell: |
+        pct exec {{ dc_b.ctid }} -- bash -lc '
+          mkdir -p /root/.ssh
+          grep -F "{{ pubkeys.results[0].stdout }}" /root/.ssh/authorized_keys 2>/dev/null || \
+            printf "%s\n" "{{ pubkeys.results[0].stdout }}" >> /root/.ssh/authorized_keys
+          chmod 700 /root/.ssh
+          chmod 600 /root/.ssh/authorized_keys
+        '
+      changed_when: true
+
+    - name: Distribute pubkey B -> A (authorized_keys)
+      ansible.builtin.shell: |
+        pct exec {{ dc_a.ctid }} -- bash -lc '
+          mkdir -p /root/.ssh
+          grep -F "{{ pubkeys.results[1].stdout }}" /root/.ssh/authorized_keys 2>/dev/null || \
+            printf "%s\n" "{{ pubkeys.results[1].stdout }}" >> /root/.ssh/authorized_keys
+          chmod 700 /root/.ssh
+          chmod 600 /root/.ssh/authorized_keys
+        '
+      changed_when: true
+
+    - name: Add peer host key to known_hosts on both DCs (first contact)
+      ansible.builtin.shell: |
+        pct exec {{ item.src.ctid }} -- bash -lc '
+          mkdir -p /root/.ssh
+          ssh-keyscan -T 5 -H {{ item.dst.ip }} >> /root/.ssh/known_hosts 2>/dev/null || true
+          chmod 700 /root/.ssh
+          chmod 644 /root/.ssh/known_hosts
+        '
+      loop:
+        - { src: "{{ dc_a }}", dst: "{{ dc_b }}" }
+        - { src: "{{ dc_b }}", dst: "{{ dc_a }}" }
+      changed_when: true
+
+    - name: Compute rsync source/target based on direction
+      ansible.builtin.set_fact:
+        rsync_src: "{{ (direction == 'push') | ternary(dc_a, dc_b) }}"
+        rsync_dst: "{{ (direction == 'push') | ternary(dc_b, dc_a) }}"
+
+    - name: Rsync SYSVOL (dry-run or real)
+      ansible.builtin.shell: |
+        pct exec {{ rsync_src.ctid }} -- bash -lc '
+          RSYNC_OPTS="-a --delete --numeric-ids"
+          {{ "RSYNC_OPTS=\"$RSYNC_OPTS -n -v\"" if dry_run else "RSYNC_OPTS=\"$RSYNC_OPTS -v\"" }}
+          rsync $RSYNC_OPTS -e "ssh -o StrictHostKeyChecking=accept-new" \
+            {{ sysvol_path }}/ {{ rsync_dst.ip }}:{{ sysvol_path }}/
+        '
+      changed_when: "{{ not dry_run }}"
