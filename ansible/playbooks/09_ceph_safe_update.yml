@@ -1,0 +1,40 @@
+- name: Install Ceph-safe update (script + systemd timer)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    bin_path: /usr/local/sbin/ceph-safe-update.sh
+    svc_path: /etc/systemd/system/ceph-safe-update.service
+    tmr_path: /etc/systemd/system/ceph-safe-update.timer
+
+  tasks:
+    - name: Ensure script installed
+      ansible.builtin.copy:
+        src: ../files/ceph-safe-update.sh
+        dest: "{{ bin_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install systemd unit
+      ansible.builtin.copy:
+        src: ../files/ceph-safe-update.service
+        dest: "{{ svc_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install systemd timer
+      ansible.builtin.copy:
+        src: ../files/ceph-safe-update.timer
+        dest: "{{ tmr_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: daemon-reload
+      ansible.builtin.shell: systemctl daemon-reload
+
+    - name: Enable + Start timer
+      ansible.builtin.shell: |
+        systemctl enable --now ceph-safe-update.timer
+        systemctl list-timers | grep ceph-safe-update || true

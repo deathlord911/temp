@@ -1,0 +1,11 @@
+[Unit]
+Description=Ceph-safe APT upgrade (node-serialised)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceph-safe-update.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
