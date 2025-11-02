@@ -1,0 +1,133 @@
+diff --git a/ansible/playbooks/05_cross_dns_and_sysvol.yml b/ansible/playbooks/05_cross_dns_and_sysvol.yml
+index 5c1b2b3..c9ab77e 100644
+--- a/ansible/playbooks/05_cross_dns_and_sysvol.yml
++++ b/ansible/playbooks/05_cross_dns_and_sysvol.yml
+@@ -18,33 +18,81 @@
+         - "{{ dc_a }}"
+         - "{{ dc_b }}"
+ 
+-    - name: Warte auf funktionierende Internetauflösung in beiden CTs
++    - name: Warte auf funktionierende Internetauflösung in beiden CTs
+       ansible.builtin.shell: |
+         pct exec {{ item.ctid }} -- bash -lc 'getent hosts deb.debian.org'
+       register: dns_bootstrap
+       retries: 15
+       delay: 2
+       until: dns_bootstrap.rc == 0
+       loop:
+         - "{{ dc_a }}"
+         - "{{ dc_b }}"
+ 
+-    # ---------- systemd-resolved sauber setzen (Cross-DNS + Fallback) ----------
+-    - name: Setze resolved.conf auf DC-A (DNS → DC-B + Fallback)
+-      ansible.builtin.shell: |
+-        pct exec {{ dc_a.ctid }} -- bash -lc "mkdir -p /etc/systemd && cat > /etc/systemd/resolved.conf <<EOF
+-        [Resolve]
+-        DNS={{ dc_b.ip }} {{ dns_fallback }}
+-        Domains=~{{ dc_a.hn }}.amazonistan.intranet amazonistan.intranet
+-        Cache=yes
+-        DNSStubListener=yes
+-        EOF
+-        ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+-        systemctl restart systemd-resolved || true
+-        "
+-    - name: Setze resolved.conf auf DC-B (DNS → DC-A + Fallback)
+-      ansible.builtin.shell: |
+-        pct exec {{ dc_b.ctid }} -- bash -lc "mkdir -p /etc/systemd && cat > /etc/systemd/resolved.conf <<EOF
+-        [Resolve]
+-        DNS={{ dc_a.ip }} {{ dns_fallback }}
+-        Domains=~{{ dc_b.hn }}.amazonistan.intranet amazonistan.intranet
+-        Cache=yes
+-        DNSStubListener=yes
+-        EOF
+-        ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
+-        systemctl restart systemd-resolved || true
+-        "
++    # ---------- Cross-DNS setzen – je nach Vorhandensein von systemd-resolved ----------
++    - name: Prüfe, ob systemd-resolved im CT existiert
++      ansible.builtin.shell: |
++        pct exec {{ item.ctid }} -- bash -lc '
++          if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^systemd-resolved.service"; then
++            echo "yes"
++          else
++            echo "no"
++          fi
++        '
++      register: has_resolved
++      changed_when: false
++      loop:
++        - "{{ dc_a }}"
++        - "{{ dc_b }}"
++      loop_control:
++        label: "{{ item.ctid }}"
++
++    - name: Cross-DNS via systemd-resolved (DC-A → DC-B)
++      ansible.builtin.shell: |
++        pct exec {{ dc_a.ctid }} -- bash -lc '
++          mkdir -p /etc/systemd
++          cat > /etc/systemd/resolved.conf <<EOF
++[Resolve]
++DNS={{ dc_b.ip }} {{ dns_fallback }}
++Domains=~{{ dc_a.hn }}.amazonistan.intranet amazonistan.intranet
++Cache=yes
++DNSStubListener=yes
++EOF
++          ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
++          systemctl restart systemd-resolved
++        '
++      when: has_resolved.results[0].stdout.strip() == "yes"
++
++    - name: Cross-DNS via systemd-resolved (DC-B → DC-A)
++      ansible.builtin.shell: |
++        pct exec {{ dc_b.ctid }} -- bash -lc '
++          mkdir -p /etc/systemd
++          cat > /etc/systemd/resolved.conf <<EOF
++[Resolve]
++DNS={{ dc_a.ip }} {{ dns_fallback }}
++Domains=~{{ dc_b.hn }}.amazonistan.intranet amazonistan.intranet
++Cache=yes
++DNSStubListener=yes
++EOF
++          ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true
++          systemctl restart systemd-resolved
++        '
++      when: has_resolved.results[1].stdout.strip() == "yes"
++
++    - name: Cross-DNS ohne systemd-resolved (DC-A → DC-B) – /etc/resolv.conf als Datei
++      ansible.builtin.shell: |
++        pct exec {{ dc_a.ctid }} -- bash -lc '
++          chattr -i /etc/resolv.conf 2>/dev/null || true
++          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
++          install -m 0644 /dev/null /etc/resolv.conf
++          cat > /etc/resolv.conf <<EOF
++search amazonistan.intranet
++nameserver {{ dc_b.ip }}
++nameserver {{ dns_fallback }}
++EOF
++        '
++      when: has_resolved.results[0].stdout.strip() == "no"
++
++    - name: Cross-DNS ohne systemd-resolved (DC-B → DC-A) – /etc/resolv.conf als Datei
++      ansible.builtin.shell: |
++        pct exec {{ dc_b.ctid }} -- bash -lc '
++          chattr -i /etc/resolv.conf 2>/dev/null || true
++          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
++          install -m 0644 /dev/null /etc/resolv.conf
++          cat > /etc/resolv.conf <<EOF
++search amazonistan.intranet
++nameserver {{ dc_a.ip }}
++nameserver {{ dns_fallback }}
++EOF
++        '
++      when: has_resolved.results[1].stdout.strip() == "no"
+ 
+     - name: Prüfe Internetauflösung nach Änderung von resolved.conf
+       ansible.builtin.shell: |
+         pct exec {{ item.ctid }} -- bash -lc 'getent hosts deb.debian.org'
+       register: dns_after
+       retries: 10
+       delay: 2
+       until: dns_after.rc == 0
+       loop:
+         - "{{ dc_a }}"
+         - "{{ dc_b }}"
