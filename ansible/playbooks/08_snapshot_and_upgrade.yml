@@ -1,0 +1,47 @@
+- name: Snapshot & Upgrade DCs
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Make LXC snapshot (if enabled)
+      ansible.builtin.shell: |
+        pct snapshot {{ item.ctid }} pre-upgrade-{{ '%Y%m%d-%H%M%S' | strftime() }}
+      when: do_snapshot
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+      changed_when: true
+
+    - name: Upgrade inside CT (lock-safe, noninteractive)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
+          for i in {1..30}; do
+            fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break
+            sleep 1
+          done
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 && pkill -9 -f "(apt|dpkg|unattended)" || true
+
+          rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock /var/lib/apt/lists/lock
+
+          dpkg --configure -a || true
+          apt -y -f install || true
+
+          apt update
+          apt -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
+        '
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+      changed_when: true
+
+    - name: Restart Samba AD-DC (optional)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          systemctl restart samba-ad-dc || true
+        '
+      when: restart_samba
+      loop: ["{{ dc_a }}", "{{ dc_b }}"]
+      changed_when: true

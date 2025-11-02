@@ -1,32 +1,34 @@
-old_dc_ctids: [100, 101]
+# Globale Variablen für alle Playbooks
 
-# Basis-Parameter für die Zamba-Container
-zmb_domain_lower: amazonistan.intranet
-zmb_domain_upper: AMAZONISTAN.INTRANET
-zmb_net_bridge: vmbr3
-zmb_net_vlan: "100"
-zmb_gw: 192.168.100.1
-zmb_dns_primary: 192.168.100.241
-zmb_dns_secondary: 1.1.1.1
+# Domäne
+domain: "amazonistan.intranet"
 
-# Speicher
-zmb_template_storage: cephfs
-zmb_rootfs_storage: raidpool
-zmb_sharefs_storage: raidpool
+# Fallback-DNS (reihenfolgebeachtend)
+dns_fallback:
+  - "1.1.1.1"
+  - "9.9.9.9"
 
-# Größen
-zmb_rootfs_size_gb: "32"
-zmb_sharefs_size_gb: "256"
+# Domain Controller A/B
+dc_a:
+  ctid: 100
+  hn: "zmb-ad"
+  ip: "192.168.100.241"
 
-# Ressourcen
-zmb_mem_mb: "4096"
-zmb_swap_mb: "1024"
-zmb_threads: "0"
+dc_b:
+  ctid: 101
+  hn: "zmb-ad-join"
+  ip: "192.168.100.242"
 
-# Admin
-zmb_admin_user: administrator
-zmb_admin_pass: "dArkn3$s"
+# SYSVOL-Pfad
+sysvol_path: "/var/lib/samba/sysvol"
 
-# feste IPs
-zmb_ad_ip: 192.168.100.241
-zmb_ad_join_ip: 192.168.100.242
+# Rsync-Richtung für SYSVOL (06)
+# "push" = A -> B, "pull" = B -> A
+direction: "push"
+
+# Trockenlauf (nur anzeigen, nichts ändern) für 06
+dry_run: true
+
+# Snapshot & Neustart-Flags für 08
+do_snapshot: true
+restart_samba: true
