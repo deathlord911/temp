@@ -1,0 +1,65 @@
+- name: Disable unattended-upgrades & apt-dailies
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.shell: systemctl daemon-reload
+
+  tasks:
+    - name: Stop apt/unattended services if running (best effort)
+      ansible.builtin.shell: |
+        systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service apt-news.service 2>/dev/null || true
+        systemctl stop apt-daily.timer apt-daily-upgrade.timer apt-news.timer 2>/dev/null || true
+      changed_when: true
+
+    - name: Disable & mask timers and services
+      ansible.builtin.shell: |
+        systemctl disable --now apt-daily.timer apt-daily-upgrade.timer apt-news.timer 2>/dev/null || true
+        systemctl disable --now unattended-upgrades.service apt-daily.service apt-daily-upgrade.service apt-news.service 2>/dev/null || true
+        systemctl mask unattended-upgrades.service apt-daily.service apt-daily-upgrade.service apt-news.service 2>/dev/null || true
+      changed_when: true
+      notify: daemon-reload
+
+    - name: Write /etc/apt/apt.conf.d/20auto-upgrades (turn off periodic)
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          APT::Periodic::Update-Package-Lists "0";
+          APT::Periodic::Unattended-Upgrade "0";
+      notify: daemon-reload
+
+    - name: (Optional) Purge unattended-upgrades package
+      ansible.builtin.shell: |
+        DEBIAN_FRONTEND=noninteractive apt-get -y purge unattended-upgrades || true
+      when: updates.unattended.purge | default(false) | bool
+      changed_when: true
+
+    - name: Ensure apt “news” feature disabled at config level
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99disable-news
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          APT::News "never";
+      notify: daemon-reload
+
+    - name: Verification summary (timers & apt periodic)
+      ansible.builtin.shell: |
+        echo "== Timers =="
+        systemctl list-timers | grep -E 'apt|unattended|news' || echo "(none)"
+        echo
+        echo "== APT::Periodic =="
+        apt-config dump | grep -E 'APT::Periodic::(Update-Package-Lists|Unattended-Upgrade)' || true
+      register: verify_out
+      changed_when: false
+
+    - name: Show verification
+      ansible.builtin.debug:
+        var: verify_out.stdout
