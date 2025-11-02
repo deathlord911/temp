@@ -32,3 +32,9 @@ dry_run: true
 # Snapshot & Neustart-Flags für 08
 do_snapshot: true
 restart_samba: true
+
+# --- Updates / Ceph-safe defaults ---
+updates:
+  ceph_safe:
+    allow_warn: false            # bei HEALTH_WARN NICHT updaten (true = trotzdem updaten)
+    on_calendar: "Sun *-*-* 03:30:00"  # systemd OnCalendar Zeitplan

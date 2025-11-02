@@ -1,40 +1,91 @@
 - name: Install Ceph-safe update (script + systemd timer)
   hosts: localhost
   gather_facts: false
-  vars:
-    bin_path: /usr/local/sbin/ceph-safe-update.sh
-    svc_path: /etc/systemd/system/ceph-safe-update.service
-    tmr_path: /etc/systemd/system/ceph-safe-update.timer
+  vars_files:
+    - ../group_vars/all.yml
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.shell: systemctl daemon-reload
+
+    - name: restart timer
+      ansible.builtin.shell: |
+        systemctl enable --now ceph-safe-update.timer
+        systemctl restart ceph-safe-update.timer
 
   tasks:
     - name: Ensure script installed
       ansible.builtin.copy:
         src: ../files/ceph-safe-update.sh
-        dest: "{{ bin_path }}"
+        dest: /usr/local/sbin/ceph-safe-update.sh
         owner: root
         group: root
-        mode: "0755"
+        mode: '0755'
+      notify: daemon-reload
 
-    - name: Install systemd unit
+    - name: Install systemd unit (service)
       ansible.builtin.copy:
         src: ../files/ceph-safe-update.service
-        dest: "{{ svc_path }}"
+        dest: /etc/systemd/system/ceph-safe-update.service
         owner: root
         group: root
-        mode: "0644"
+        mode: '0644'
+      notify: daemon-reload
 
-    - name: Install systemd timer
+    - name: Ensure drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-safe-update.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure ALLOW_WARN drop-in (enabled)
       ansible.builtin.copy:
-        src: ../files/ceph-safe-update.timer
-        dest: "{{ tmr_path }}"
+        dest: /etc/systemd/system/ceph-safe-update.service.d/override.conf
         owner: root
         group: root
-        mode: "0644"
+        mode: '0644'
+        content: |
+          [Service]
+          Environment=ALLOW_WARN=true
+      when: updates.ceph_safe.allow_warn | default(false) | bool
+      notify:
+        - daemon-reload
+        - restart timer
 
-    - name: daemon-reload
-      ansible.builtin.shell: systemctl daemon-reload
+    - name: Remove ALLOW_WARN drop-in (disabled)
+      ansible.builtin.file:
+        path: /etc/systemd/system/ceph-safe-update.service.d/override.conf
+        state: absent
+      when: not (updates.ceph_safe.allow_warn | default(false) | bool)
+      notify:
+        - daemon-reload
+        - restart timer
 
-    - name: Enable + Start timer
+    - name: Install systemd timer (from template variables)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ceph-safe-update.timer
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Schedule: Ceph-safe update ({{ updates.ceph_safe.on_calendar }})
+
+          [Timer]
+          OnCalendar={{ updates.ceph_safe.on_calendar }}
+          Persistent=true
+          Unit=ceph-safe-update.service
+
+          [Install]
+          WantedBy=timers.target
+      notify:
+        - daemon-reload
+        - restart timer
+
+    - name: Enable + Start timer (first run)
       ansible.builtin.shell: |
         systemctl enable --now ceph-safe-update.timer
-        systemctl list-timers | grep ceph-safe-update || true
+        systemctl restart ceph-safe-update.timer
+      changed_when: true
