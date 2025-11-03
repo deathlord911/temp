@@ -1,0 +1,99 @@
+- name: Pre-Update Health Gate (Ceph + Host + APT)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    updates:
+      gate:
+        apt_lock_timeout: 180   # kann per -e überschrieben werden
+
+  tasks:
+    # 0) Proxmox Auto-Upgrades (Timer) vorsorglich aus (kollisionsfrei)
+    - name: Disable pve-auto-upgrades.timer during gate (non-destructive)
+      ansible.builtin.shell: |
+        systemctl stop pve-auto-upgrades.timer 2>/dev/null || true
+        systemctl disable pve-auto-upgrades.timer 2>/dev/null || true
+      changed_when: false
+
+    # 1) APT sauber vorbereiten: Services stoppen, gezielt killen, stale Locks ohne Owner entfernen
+    - name: Pre-clean APT (safe stop, targeted kill, clear stale locks)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+        systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+        systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
+        # nur bekannte Störer, gezielt:
+        for p in unattended-upgrade unattended-upgrades apt apt-get dpkg needrestart debconf packagekitd packagekit; do
+          pkill -9 -f "(^|/)${p}(\s|$)" 2>/dev/null || true
+        done
+
+        # stale Locks (ohne Owner) entfernen
+        for l in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend \
+                 /var/cache/apt/archives/lock /var/lib/apt/lists/lock \
+                 /var/cache/debconf/config.dat; do
+          [ -e "$l" ] || continue
+          fuser "$l" >/dev/null 2>&1 || rm -f "$l" || true
+        done
+
+        dpkg --configure -a || true
+        apt -y -f install || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # 2) Warten bis wirklich frei – mit striktem Prozess-Match + Lock-Recheck + Debug
+    - name: Wait until APT/DPKG are idle (strict proc match + stale lock cleanup + verbose on timeout)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        TIMEOUT="{{ updates.gate.apt_lock_timeout | default(180) }}"
+        SLEEP=1
+
+        strict_busy() {
+          ps -eo pid,comm --no-headers | awk '
+            $2=="apt"||$2=="apt-get"||$2=="aptitude"||
+            $2=="dpkg"||$2=="unattended-upgrade"||$2=="unattended-upgrades"||
+            $2=="packagekitd"||$2=="packagekit"||$2=="needrestart"||$2=="debconf" {print $0}'
+        }
+        list_locks() {
+          for l in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend \
+                   /var/cache/apt/archives/lock /var/lib/apt/lists/lock \
+                   /var/cache/debconf/config.dat; do [ -e "$l" ] && echo "$l"; done
+        }
+
+        for i in $(seq 1 "$TIMEOUT"); do
+          BUSY="$(strict_busy || true)"
+          if [ -z "$BUSY" ]; then
+            # ohne Prozesse: leftover Locks ohne Owner weg
+            for L in $(list_locks); do fuser "$L" >/dev/null 2>&1 || rm -f "$L" || true; done
+            # alles weg?
+            STILL=0; for L in $(list_locks); do STILL=1; break; done
+            [ "$STILL" -eq 0 ] && { echo OK; exit 0; }
+          fi
+          sleep "$SLEEP"
+        done
+
+        echo "BUSY"
+        echo "=== DEBUG: matched processes ==="; strict_busy || true
+        echo "=== DEBUG: locks and holders ==="
+        for l in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend \
+                 /var/cache/apt/archives/lock /var/lib/apt/lists/lock \
+                 /var/cache/debconf/config.dat; do
+          [ -e "$l" ] || continue
+          echo "-- $l"; ls -l "$l" || true; fuser -v "$l" 2>/dev/null || echo "(no holder)"
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: lock_wait
+      changed_when: false
+
+    - name: Show debug when APT still busy
+      ansible.builtin.debug:
+        var: lock_wait.stdout_lines
+      when: lock_wait.stdout is defined and lock_wait.stdout != "OK"
+
+    - name: Fail if APT is still busy
+      ansible.builtin.fail:
+        msg: "APT/dpkg still busy or stale locks present (see previous debug)."
+      when: lock_wait.stdout is defined and lock_wait.stdout != "OK"
