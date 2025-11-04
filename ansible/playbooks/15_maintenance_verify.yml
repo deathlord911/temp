@@ -56,18 +56,31 @@
         issues: "{{ issues + [ 'ceph-safe-update.timer is not enabled' ] }}"
       when: timer_enabled.stdout.strip() not in ['enabled']
 
-    - name: Check pve-auto-upgrades.timer (exists & enabled?)
+    - name: Check pve-auto-upgrades.timer (enabled?)
       ansible.builtin.shell: |
-        systemctl list-unit-files | awk '{print $1}' | grep -qx 'pve-auto-upgrades.timer' \
-          && systemctl is-enabled pve-auto-upgrades.timer || echo "not-present"
-      register: pve_auto_timer
+        systemctl is-enabled pve-auto-upgrades.timer 2>/dev/null || true
+      register: pve_auto_enabled
       changed_when: false
-      failed_when: false
 
-    - name: Flag if pve-auto-upgrades.timer present and enabled
+    - name: Check pve-auto-upgrades.timer (active?)
+      ansible.builtin.shell: |
+        systemctl is-active pve-auto-upgrades.timer 2>/dev/null || true
+      register: pve_auto_active
+      changed_when: false
+
+    - name: Flag if pve-auto-upgrades.timer enabled or active
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'pve-auto-upgrades.timer is enabled (should be disabled)' ] }}"
-      when: pve_auto_timer.stdout.strip() not in ['disabled','masked','not-present']
+        maint_issues: "{{ maint_issues + ['pve-auto-upgrades.timer is enabled/active (should be disabled)'] }}"
+      when: >
+        (pve_auto_enabled.stdout | trim == 'enabled') or
+        (pve_auto_active.stdout  | trim == 'active')
+
+    - name: Debug pve-auto-upgrades timer status
+      ansible.builtin.debug:
+        msg:
+          enabled: "{{ pve_auto_enabled.stdout | trim }}"
+          active:  "{{ pve_auto_active.stdout  | trim }}"
+      when: updates.debug | default(false)
 
     - name: Check unattended-upgrades.service masked
       ansible.builtin.shell: systemctl is-enabled unattended-upgrades.service || true
