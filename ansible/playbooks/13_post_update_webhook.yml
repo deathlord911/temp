@@ -3,30 +3,33 @@
   gather_facts: false
 
   vars:
-    webhook_url: "{{ webhook_url | default('') }}"
-    webhook_method: "{{ webhook_method | default('POST') }}"
-    webhook_headers: "{{ webhook_headers | default('Content-Type: application/json') }}"
-    message: "{{ message | default('Update completed') }}"
+    webhook_url: ""                       # via -e setzen; leer => skip
+    webhook_method_default: "POST"
+    message_default: "Update completed"
+
+    # Headers als Dict (uri erwartet Dict). Content-Type wird bei body_format: json
+    # automatisch gesetzt – du kannst hier zusätzliche Header ergänzen.
+    webhook_headers_default: {}
 
   tasks:
     - name: Skip if webhook_url not provided
       ansible.builtin.debug:
         msg: "No webhook_url provided; skipping"
-      when: webhook_url | length == 0
+      when: (webhook_url | default('')) | length == 0
 
-    - name: Send webhook
-      ansible.builtin.shell: |
-        set -e
-        payload=$(jq -n \
-          --arg host "$(hostname -f)" \
-          --arg msg  "{{ message }}" \
-          --arg time "$(date -Is)" \
-          '{host:$host, message:$msg, time:$time}')
-        curl -fsS -X "{{ webhook_method }}" \
-          -H "{{ webhook_headers }}" \
-          -d "$payload" \
-          "{{ webhook_url }}"
-      args:
-        executable: /bin/bash
-      when: webhook_url | length > 0
+    - name: Send webhook (JSON) via uri
+      ansible.builtin.uri:
+        url: "{{ webhook_url }}"
+        method: "{{ webhook_method | default(webhook_method_default) }}"
+        headers: "{{ webhook_headers | default(webhook_headers_default) }}"
+        body_format: json
+        body:
+          host: "{{ lookup('pipe','hostname -f') }}"
+          message: "{{ message | default(message_default) }}"
+          time: "{{ lookup('pipe','date -Is') }}"
+        status_code: [200,201,202,204]
+        return_content: false
+        timeout: 20
+        validate_certs: true
+      when: (webhook_url | default('')) | length > 0
       changed_when: true
