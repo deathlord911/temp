@@ -104,4 +104,4 @@
 
 ---
 
-🧰 *Zamba / Proxmox Automation Suite – Change History v1.0 → v1.5 (Stand November 2025)*
+🧰 *Zamba / Proxmox Automation Suite – Change History v1.0 → v1.6 (Stand November 2025)*
