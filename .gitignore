@@ -4,3 +4,7 @@ reports/logs/*.log
 # Python/Ansible Kleinkram
 *.retry
 __pycache__/
+# Local artifacts
+*.patch
+ansible/playbooks/reports/*
+!ansible/playbooks/reports/.gitkeep
