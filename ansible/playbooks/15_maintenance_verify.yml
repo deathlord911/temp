@@ -96,16 +96,25 @@
 
     - name: Detect common lock files
       ansible.builtin.shell: |
+        found=0
         for l in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock /var/lib/apt/lists/lock; do
-          [ -e "$l" ] && echo "$l";
+          if [ -e "$l" ]; then
+            echo "$l"
+            found=1
+          fi
         done
+        # immer mit RC 0 raus, damit Ansible nicht scheitert
+        exit 0
+      args:
+        executable: /bin/bash
       register: apt_locks
       changed_when: false
+      failed_when: false
 
     - name: Flag if APT locks present
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'APT lock files present: ' ~ (apt_locks.stdout | replace('\n',', ')) ] }}"
-      when: apt_locks.stdout | trim != ""
+        issues: "{{ issues + ['APT lock files present: ' + (apt_locks.stdout_lines | join(', '))] }}"
+      when: apt_locks.stdout | trim != ''
 
     #####################################################################
     # AD Checks (beide DCs)
