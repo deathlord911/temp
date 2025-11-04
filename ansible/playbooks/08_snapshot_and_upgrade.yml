@@ -4,6 +4,13 @@
   vars_files:
     - ../group_vars/all.yml
 
+- name: Run Pre-Update Gate first
+  import_playbook: 11_preupdate_health_gate.yml
+  vars:
+    updates:
+      gate:
+        apt_lock_timeout: "{{ updates.gate.apt_lock_timeout | default(180) }}"
+
   tasks:
     - name: Make LXC snapshot (if enabled)
       ansible.builtin.shell: |
