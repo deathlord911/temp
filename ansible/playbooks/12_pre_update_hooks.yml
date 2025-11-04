@@ -1,0 +1,28 @@
+- name: Run pre-update hooks (local, sequential)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    hooks_dir: "/usr/local/lib/preupdate-hooks.d"
+
+  tasks:
+    - name: Ensure hooks directory exists
+      ansible.builtin.file:
+        path: "{{ hooks_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Run executable hooks in order
+      ansible.builtin.shell: |
+        set -e
+        shopt -s nullglob
+        for h in {{ hooks_dir }}/* ; do
+          [ -x "$h" ] || continue
+          echo "== PRE-HOOK: $h =="
+          "$h"
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true

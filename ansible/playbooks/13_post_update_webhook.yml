@@ -1,0 +1,32 @@
+- name: Post-update webhook notification (optional)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    webhook_url: "{{ webhook_url | default('') }}"
+    webhook_method: "{{ webhook_method | default('POST') }}"
+    webhook_headers: "{{ webhook_headers | default('Content-Type: application/json') }}"
+    message: "{{ message | default('Update completed') }}"
+
+  tasks:
+    - name: Skip if webhook_url not provided
+      ansible.builtin.debug:
+        msg: "No webhook_url provided; skipping"
+      when: webhook_url | length == 0
+
+    - name: Send webhook
+      ansible.builtin.shell: |
+        set -e
+        payload=$(jq -n \
+          --arg host "$(hostname -f)" \
+          --arg msg  "{{ message }}" \
+          --arg time "$(date -Is)" \
+          '{host:$host, message:$msg, time:$time}')
+        curl -fsS -X "{{ webhook_method }}" \
+          -H "{{ webhook_headers }}" \
+          -d "$payload" \
+          "{{ webhook_url }}"
+      args:
+        executable: /bin/bash
+      when: webhook_url | length > 0
+      changed_when: true

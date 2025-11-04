@@ -1,0 +1,33 @@
+- name: Guard APT automation (disable PVE auto upgrades & unattended), enable ceph-safe timer
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ceph_timer: "ceph-safe-update.timer"
+    ceph_service: "ceph-safe-update.service"
+    pve_timer: "pve-auto-upgrades.timer"
+    pve_service: "pve-auto-upgrades.service"
+    unattended_service: "unattended-upgrades.service"
+
+  tasks:
+    - name: Disable & mask unattended-upgrades
+      ansible.builtin.shell: |
+        systemctl stop {{ unattended_service }} 2>/dev/null || true
+        systemctl disable --now {{ unattended_service }} 2>/dev/null || true
+        systemctl mask {{ unattended_service }} 2>/dev/null || true
+      changed_when: true
+
+    - name: Disable PVE auto-upgrades (timer+service) if present
+      ansible.builtin.shell: |
+        systemctl stop {{ pve_timer }} {{ pve_service }} 2>/dev/null || true
+        systemctl disable --now {{ pve_timer }} {{ pve_service }} 2>/dev/null || true
+        systemctl mask {{ pve_service }} 2>/dev/null || true
+      changed_when: true
+
+    - name: Ensure our ceph-safe timer is enabled and active
+      ansible.builtin.shell: |
+        systemctl daemon-reload
+        systemctl enable --now {{ ceph_timer }}
+        systemctl is-active {{ ceph_timer }}
+      register: ceph_timer_active
+      changed_when: "'active' not in ceph_timer_active.stdout"
