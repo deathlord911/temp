@@ -71,6 +71,25 @@
 
 ---
 
+## v1.6 — Samba AD Backup Fix & Final Stabilisierung (2025-11-04)
+
+### 🧩 Fixes
+- **`14_ad_backup.yml`**:  
+  - Ersetzt fehleranfällige Heredoc-Variante durch robuste, YAML-sichere Rotation (`ls | awk | xargs`).  
+  - Keine unbalancierten Jinja-Blöcke oder Quotes mehr – läuft jetzt zuverlässig auch bei Cron-Ausführung.
+  - Prüft konsistent auf Backup-Verzeichnis (`backup_dir`) und behält die letzten _n_ Backups (`keep`).
+- Verifikation erfolgreich: Backup auf `zmb-ad` (CT 100) wird erstellt und rotiert korrekt.
+
+### 🧱 General Stability
+- Abschlussprüfung aller Playbooks (01–14) in Pipeline:  
+  - APT/Update-Kette (10 → 11 → 12 → 13) validiert.  
+  - `ceph-safe-update`-Timer aktiv und funktionierend.  
+  - AD-Health-Reports automatisiert über `cron-07_ad_health_report.log`.
+
+### 🏷 Tag
+`v1.6` — _"AD Backup Safe & Sound"_
+
+
 ## 🔖 Tag-Übersicht
 
 | Tag    | Datum      | Inhalt                           |
@@ -81,6 +100,7 @@
 | `v1.3` | 2025-10-29 | Docs + Refactoring               |
 | `v1.4` | 2025-11-03 | Webhook + Ops Automation         |
 | `v1.5` | 2025-11-04 | Backup + Health-Timer + Ceph Fix |
+| `v1.6` | 2025-11-04 | AD Backup Safe & Sound           |
 
 ---
 
