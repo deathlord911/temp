@@ -1,0 +1,50 @@
+- name: Install weekly AD health report timer
+  hosts: localhost
+  gather_facts: false
+  vars:
+    unit_dir: /etc/systemd/system
+    playbook_path: "/root/temp/ansible/playbooks/07_ad_health_report.yml"
+    ans_cfg: "/root/temp/ansible/ansible.cfg"
+    on_calendar: "Sun *-*-* 03:20:00"   # So 03:20
+  tasks:
+    - name: Install service unit
+      ansible.builtin.copy:
+        dest: "{{ unit_dir }}/ad-health-report.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Weekly AD Health Report
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/env bash -lc 'ANSIBLE_CONFIG={{ ans_cfg }} ansible-playbook {{ playbook_path }}'
+          Nice=10
+          IOSchedulingClass=best-effort
+          IOSchedulingPriority=6
+
+    - name: Install timer
+      ansible.builtin.copy:
+        dest: "{{ unit_dir }}/ad-health-report.timer"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Schedule weekly AD Health Report
+
+          [Timer]
+          OnCalendar={{ on_calendar }}
+          Persistent=true
+          RandomizedDelaySec=180
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: daemon-reload
+      ansible.builtin.shell: systemctl daemon-reload
+      changed_when: true
+
+    - name: Enable + start timer
+      ansible.builtin.shell: |
+        systemctl enable --now ad-health-report.timer
+      changed_when: true

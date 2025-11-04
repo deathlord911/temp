@@ -1,0 +1,79 @@
+# ansible/playbooks/10_disable_unattended_upgrades.yml
+- name: Disable unattended-upgrades & apt-daily timers on DCs
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml   # enthält dc_a, dc_b etc.
+
+  vars:
+    # Falls du das Purge nicht willst, setze hier false
+    purge_unattended: true
+
+  tasks:
+    - name: Stop & disable apt-daily services/timers (on each DC)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          set -e
+          # systemd-Services/Timer, wo vorhanden
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+            systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          fi
+
+          # Cron-Reste (Distribution-abhängig, optional vorhanden)
+          rm -f /etc/cron.daily/apt 2>/dev/null || true
+          rm -f /etc/cron.daily/apt-compat 2>/dev/null || true
+          rm -f /etc/cron.weekly/apt-security-updates 2>/dev/null || true
+
+          # APT::Periodic hart auf 0 setzen (überschreibt evtl. vorhandene Dateien)
+          mkdir -p /etc/apt/apt.conf.d
+          cat >/etc/apt/apt.conf.d/10periodic-disable <<EOF
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+
+          # Auto-Upgrade-Trigger-Datei neutralisieren
+          : > /etc/apt/apt.conf.d/20auto-upgrades || true
+
+          # Paket unattended-upgrades (optional) purgen
+          if {{ purge_unattended | ternary("true","false") }}; then
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq unattended-upgrades || true
+            rm -f /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true
+          fi
+        '
+      loop:
+        - "{{ dc_a }}"
+        - "{{ dc_b }}"
+      changed_when: true
+
+    - name: Verify timers are gone (best-effort)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl list-timers | egrep -i "apt.*daily" || true
+          else
+            echo "systemd not present"
+          fi
+        '
+      register: timers
+      loop:
+        - "{{ dc_a }}"
+        - "{{ dc_b }}"
+      changed_when: false
+
+    - name: Show APT::Periodic state (best-effort)
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc '
+          if command -v apt-config >/dev/null 2>&1; then
+            apt-config dump | egrep -i "APT::Periodic|Unattended" || true
+          fi
+          test -f /etc/apt/apt.conf.d/10periodic-disable && sed -n "1,50p" /etc/apt/apt.conf.d/10periodic-disable || true
+        '
+      loop:
+        - "{{ dc_a }}"
+        - "{{ dc_b }}"
+      changed_when: false

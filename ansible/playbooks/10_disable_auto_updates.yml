@@ -1,0 +1,46 @@
+- name: Disable all unattended/auto updates (host + selected CTs)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml   # optional: dort z.B. dc_a/dc_b, ct_list definieren
+  vars:
+    ct_list: ["{{ dc_a.ctid | default(100) }}", "{{ dc_b.ctid | default(101) }}"]
+    remove_packages: true        # auf "false" setzen, wenn Paket installed bleiben soll
+  tasks:
+    - name: Host | mask + stop timers/services
+      ansible.builtin.shell: |
+        set -e
+        systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+        systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+        systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+        systemctl disable --now pve-auto-upgrades.timer 2>/dev/null || true
+      changed_when: true
+
+    - name: Host | remove cron leftovers if present
+      ansible.builtin.shell: |
+        set -e
+        rm -f /etc/cron.daily/apt-compat /etc/cron.daily/unattended-upgrades 2>/dev/null || true
+      changed_when: true
+
+    - name: Host | purge unattended-upgrades (optional)
+      ansible.builtin.shell: |
+        set -e
+        if {{ remove_packages | ternary('true','false') }}; then
+          apt-get -y purge unattended-upgrades || true
+        fi
+      changed_when: true
+
+    - name: CTs | disable updates in containers
+      ansible.builtin.shell: |
+        pct exec {{ item }} -- bash -lc '
+          set -e
+          systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+          systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          systemctl mask apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+          rm -f /etc/cron.daily/apt-compat /etc/cron.daily/unattended-upgrades 2>/dev/null || true
+          if {{ remove_packages | ternary("true","false") }}; then
+            apt-get -y purge unattended-upgrades || true
+          fi
+        '
+      loop: "{{ ct_list }}"
+      changed_when: true

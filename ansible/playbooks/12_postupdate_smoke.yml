@@ -1,0 +1,44 @@
+- name: Post-Update Smoke Tests (AD + DNS + dpkg)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    dcs:
+      - "{{ dc_a }}"
+      - "{{ dc_b }}"
+  tasks:
+    - name: dpkg sanity on host
+      ansible.builtin.shell: |
+        set -e
+        dpkg --audit || true
+        dpkg --configure -a || true
+        apt -y -f install || true
+      changed_when: false
+
+    - name: Samba DNS recursion check (dig) on each DC
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc \
+        "dig +time=2 +retry=1 @127.0.0.1 deb.debian.org A >/dev/null"
+      loop: "{{ dcs }}"
+      changed_when: false
+
+    - name: DRS replication check on each DC
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- samba-tool drs showrepl
+      loop: "{{ dcs }}"
+      register: drs
+      changed_when: false
+
+    - name: wbinfo trust check on each DC
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- wbinfo -t
+      loop: "{{ dcs }}"
+      changed_when: false
+
+    - name: SYSVOL presence on each DC
+      ansible.builtin.shell: |
+        pct exec {{ item.ctid }} -- bash -lc \
+        'test -d /var/lib/samba/sysvol && echo OK || (echo "SYSVOL MISSING"; exit 1)'
+      loop: "{{ dcs }}"
+      changed_when: false
