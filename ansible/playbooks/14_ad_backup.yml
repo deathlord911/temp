@@ -62,20 +62,11 @@
 
     # --- 4) Rotation: nur die neuesten {{ keep }} Backups behalten ---
     - name: Rotate old backups on dc_a (keep {{ keep }})
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          set -e
-          KEEP="{{ keep }}"
-          DIR="{{ backup_dir }}"
-          shopt -s nullglob
-          mapfile -t files < <(ls -1t "$DIR"/samba-backup-*.tar.bz2 2>/dev/null || true)
-          cnt="${#files[@]}"
-          if (( cnt > KEEP )); then
-            for f in "${files[@]:KEEP}"; do
-              rm -f -- "$f"
-            done
-          fi
-        '
+      ansible.builtin.shell: >
+        pct exec {{ dc_a.ctid }} -- bash -lc
+        'set -euo pipefail; KEEP="{{ keep }}"; DIR="{{ backup_dir }}"; ls -1t "$DIR"/samba-backup-*.tar.bz2 2>/dev/null | awk -v k="$KEEP" "NR>k" | xargs -r rm -f --'
+      args:
+        executable: /bin/bash
       changed_when: true
 
     # --- 5) Optional: rsync der Backups auf DC-B (nur wenn do_rsync=true) ---
