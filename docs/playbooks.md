@@ -1,292 +1,104 @@
-# 🧩 Ansible Playbook Suite – Zamba / Proxmox Automation
+# 📘 Playbook-Referenz (Zamba / Proxmox Automation Suite)
 
-**Stand:** November 2025
-**Version:** v1.4 → v1.5 (in Entwicklung)
+**Version:** v1.5  **Stand:** November 2025
 **Maintainer:** Stephan Boerner
 
 ---
 
-## 📘 Zweck
+## 🧱 01–03: Setup & Installation
 
-Diese Playbook-Sammlung automatisiert das Management einer **Zamba Active Directory Umgebung**
-in Verbindung mit einem **Proxmox-Cluster (Ceph Storage)**.
-Sie deckt den vollständigen Lebenszyklus ab – von Installation über Health-Checks bis Backup und Upgrades.
+| Nr.    | Playbook                     | Zweck                               | Hauptaufgaben                                            |
+| ------ | ---------------------------- | ----------------------------------- | -------------------------------------------------------- |
+| **01** | `01_prepare_environment.yml` | Basisumgebung & Verzeichnisstruktur | Vorbereitung von SSH, Ansible-Verzeichnis, lokale Checks |
+| **02** | `02_install_dc_primary.yml`  | Installation des ersten Samba-DC    | Provisionierung, DNS-Setup, Basiskonfiguration           |
+| **03** | `03_install_dc_join.yml`     | Beitritt des zweiten DC             | Domain Join, Synchronisation, Test der Replikation       |
 
 ---
 
-## 🗂 Struktur
+## 🧩 04–06: Replikation & SYSVOL
+
+| Nr.    | Playbook                      | Zweck                  | Hauptaufgaben                                                 |
+| ------ | ----------------------------- | ---------------------- | ------------------------------------------------------------- |
+| **04** | `04_drs_health_check.yml`     | DRS-Status prüfen      | Führt `samba-tool drs showrepl` und Health Checks aus         |
+| **05** | `05_dns_health_check.yml`     | DNS- und SRV-Tests     | Überprüft interne und externe DNS-Auflösung                   |
+| **06** | `06_sysvol_key_and_rsync.yml` | SYSVOL Synchronisation | SSH-Key-Verteilung, Rsync (dry-run & real), Known-Hosts Setup |
+
+---
+
+## 🧾 07: Monitoring
+
+| Nr.    | Playbook                  | Zweck                          | Hauptaufgaben                                                                                           |
+| ------ | ------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| **07** | `07_ad_health_report.yml` | Erzeugt Markdown-Health-Report | Führt AD-Prüfungen (DRS, DNS, DB-Check, wbinfo) aus, speichert Berichte in `ansible/playbooks/reports/` |
+
+---
+
+## 💾 08–11: Updates & Wartung
+
+| Nr.    | Playbook                         | Zweck                | Hauptaufgaben                                                                                                      |
+| ------ | -------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **08** | `08_snapshot_and_upgrade.yml`    | Snapshot + Upgrade   | Erstellt Container-Snapshots und führt `apt full-upgrade` durch                                                    |
+| **09** | `09_ceph_safe_update.yml`        | Ceph-sicheres Update | Installiert Script & Timer `/usr/local/sbin/ceph-safe-update.sh`, führt wöchentliche Updates nur bei HEALTH_OK aus |
+| **10** | `10_pve_auto_upgrades_guard.yml` | Update-Wächter       | Deaktiviert `unattended-upgrades` & `pve-auto-upgrades.timer`, aktiviert stattdessen den Ceph-Safe-Timer           |
+| **11** | `11_preupdate_health_gate.yml`   | Health-Gate          | Stoppt APT-Dienste, prüft Locks, validiert Cluster-/Ceph-Status vor Upgrades                                       |
+
+---
+
+## 🔔 12–13: Hooks & Automation
+
+| Nr.    | Playbook                     | Zweck                    | Hauptaufgaben                                                                   |
+| ------ | ---------------------------- | ------------------------ | ------------------------------------------------------------------------------- |
+| **12** | `12_pre_update_hooks.yml`    | Lokale Hooks ausführen   | Führt ausführbare Dateien in `/etc/ansible/pre_update_hooks/` aus               |
+| **13** | `13_post_update_webhook.yml` | Webhook-Benachrichtigung | Sendet JSON-Webhook nach erfolgreichem Update (URI-Modul, reine JSON-Nachricht) |
+
+---
+
+## 📦 14: Backup & Health-Timer
+
+| Nr.     | Playbook                 | Zweck                         | Hauptaufgaben                                                                                                   |
+| ------- | ------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **13b** | `13_ad_health_timer.yml` | Zeitgesteuerter Health-Report | Systemd-Timer für wöchentliche Ausführung von `07_ad_health_report.yml`                                         |
+| **14**  | `14_ad_backup.yml`       | Samba AD Online-Backup        | Führt `samba-tool domain backup online` per Kerberos-Keytab aus, legt Backups unter `/var/backups/samba-ad/` ab |
+
+---
+
+## 🧰 Zusatzdateien
+
+| Datei                                    | Beschreibung                                      |
+| ---------------------------------------- | ------------------------------------------------- |
+| `ansible/files/ceph-safe-update.sh`      | Script für Ceph-sicheres APT-Update               |
+| `ansible/files/ceph-safe-update.service` | Systemd-Service für manuelle Ausführung           |
+| `ansible/files/ceph-safe-update.timer`   | Systemd-Timer (So 03:30) für wöchentliche Updates |
+
+---
+
+## 🧭 Abhängigkeiten
+
+| Komponente         | Voraussetzung                                           |
+| ------------------ | ------------------------------------------------------- |
+| `Ceph-safe Update` | Ceph-CLI installiert & HEALTH_OK                        |
+| `AD Backup`        | gültiger Kerberos-Keytab vorhanden (`/etc/krb5.keytab`) |
+| `SYSVOL Sync`      | SSH-Schlüsselpaar A ↔ B eingerichtet                    |
+| `Webhook`          | Internetzugang und gültige URL                          |
+| `Health Report`    | `samba-tool`, `jq`, `dnsutils`, `wbinfo` verfügbar      |
+
+---
+
+## 🧩 Pflege & Entwicklung
 
 ```bash
-ansible/
- ├── ansible.cfg
- ├── group_vars/
- │   └── all.yml
- ├── playbooks/
- │   ├── 01_prepare_environment.yml
- │   ├── 02_install_zamba.yml
- │   ├── 03_join_domain.yml
- │   ├── 04_replicate_drs.yml
- │   ├── 05_dns_health.yml
- │   ├── 06_sysvol_key_and_rsync.yml
- │   ├── 07_ad_health_report.yml
- │   ├── 08_snapshot_and_upgrade.yml
- │   ├── 09_ceph_safe_update.yml
- │   ├── 10_pve_auto_upgrades_guard.yml
- │   ├── 11_preupdate_health_gate.yml
- │   ├── 12_pre_update_hooks.yml
- │   ├── 13_post_update_webhook.yml
- │   ├── 14_ad_backup.yml
- │   └── reports/.gitkeep
- └── files/
-     ├── ceph-safe-update.sh
-     ├── ceph-safe-update.service
-     └── ceph-safe-update.timer
+# Neues Playbook anlegen
+ansible-playbook --syntax-check ansible/playbooks/<name>.yml
+
+# Dokumentation aktualisieren
+git add docs/playbooks.md
+git commit -m "docs: update playbook reference"
+git push
 ```
 
 ---
 
-## ⚙️ Globale Variablen (`group_vars/all.yml`)
+📚 *Siehe auch:*
 
-| Variable                                                      | Beschreibung                                          |
-| ------------------------------------------------------------- | ----------------------------------------------------- |
-| `dc_a`, `dc_b`                                                | Container-IDs oder Hostnamen der Domain Controller    |
-| `sysvol_path`                                                 | Pfad zum SYSVOL-Verzeichnis (`/var/lib/samba/sysvol`) |
-| `backup_dir`                                                  | Zielpfad für AD-Backups (`/var/backups/samba-ad`)     |
-| `direction`                                                   | Sync-Richtung für SYSVOL (`push` oder `pull`)         |
-| `dry_run`                                                     | Nur Testlauf bei Rsync                                |
-| `reports_dir`                                                 | Pfad für generierte Reports                           |
-| `updates.gate.apt_lock_timeout`                               | Timeout für APT-Lock-Check                            |
-| `webhook_url`, `webhook_method`, `webhook_headers`, `message` | Optionen für Webhook-Playbook                         |
-
----
-
-## 🧩 Playbooks
-
-### **01_prepare_environment**
-
-Basis-Vorbereitung: Pakete, SSH-Zugang, Verzeichnisstruktur, Dependencies.
-
-### **02_install_zamba**
-
-Installation und Basiskonfiguration des ersten Zamba Domain Controllers (AD DC).
-
-### **03_join_domain**
-
-Einbindung eines zweiten DC in die bestehende AD-Domäne (Replikationspartner).
-
-### **04_replicate_drs**
-
-Test und Validierung der AD-Replikation (`samba-tool drs showrepl`, `ldapcmp`).
-
-### **05_dns_health**
-
-Überprüfung des DNS-Subsystems:
-
-* Forward/Reverse-Lookups
-* interner Samba-DNS-Status
-* Vergleich der Zonen zwischen DCs
-
----
-
-### **06_sysvol_key_and_rsync**
-
-Synchronisation des SYSVOL-Inhalts über SSH + Rsync:
-
-1. SSH-Key-Paare (ed25519) erstellen
-2. gegenseitigen Keyaustausch automatisieren
-3. `known_hosts` pflegen
-4. Rsync je nach `direction` ausführen
-
----
-
-### **07_ad_health_report**
-
-Automatisierter Systembericht:
-
-* `samba-tool drs showrepl`
-* `samba-tool dbcheck --cross-ncs`
-* `wbinfo -t`
-* `host`/`dig` DNS-Checks
-  Ergebnis als Markdown unter `ansible/playbooks/reports/`.
-
----
-
-### **08_snapshot_and_upgrade**
-
-* Erstellt LXC-Snapshots via `pct snapshot`
-* Führt `apt update && apt full-upgrade` aus
-* Post-Snapshot nach erfolgreichem Upgrade
-* Rollback-Hinweise werden protokolliert
-
----
-
-### **09_ceph_safe_update**
-
-Sicheres Update mit Cluster-Awareness:
-
-**Mechanismus:**
-
-* Script `/usr/local/sbin/ceph-safe-update.sh`
-* prüft `ceph status --format json`
-* führt APT-Upgrade nur bei `HEALTH_OK` durch
-* schreibt Logeinträge über `logger`
-
-**Systemd Integration:**
-
-* `ceph-safe-update.service`
-* `ceph-safe-update.timer` (Sonntag 03:30 Uhr)
-
----
-
-### **10_pve_auto_upgrades_guard**
-
-Deaktiviert PVE-/Debian-Autoupdate-Mechanismen:
-
-* `unattended-upgrades`
-* `apt-daily*`
-* `pve-auto-upgrades`
-  Aktiviert und prüft stattdessen den `ceph-safe-update.timer`.
-
----
-
-### **11_preupdate_health_gate**
-
-Sperrt Upgrades bei ungünstigen Bedingungen:
-
-* prüft APT/Dpkg-Locks
-* stoppt automatische Upgrades
-* bricht bei Ceph- oder Lock-Problemen kontrolliert ab
-  → sorgt dafür, dass Updates nur bei stabilem System laufen.
-
----
-
-### **12_pre_update_hooks**
-
-Führt lokale Pre-Hooks aus:
-
-```
-/etc/ansible/hooks/pre-update.d/*
-```
-
-z. B. für Backups, Notifications, Systemflags.
-
----
-
-### **13_post_update_webhook**
-
-Benachrichtigt nach Updates via Webhook (JSON über `uri`):
-
-```bash
-ansible-playbook ansible/playbooks/13_post_update_webhook.yml \
-  -e 'webhook_url=https://example.com/hook message="Update OK"'
-```
-
-**Beispiel-Payload:**
-
-```json
-{
-  "host": "pve3.amazonistan.intranet",
-  "message": "Update OK on pve3",
-  "time": "2025-11-03T23:59:00+01:00"
-}
-```
-
-Mit Headern:
-
-```bash
--e 'webhook_headers={"X-Token":"abc123","X-Env":"prod"}'
-```
-
----
-
-### **14_ad_backup**
-
-Online-Backup des Samba AD über Kerberos-Authentifizierung:
-
-**Kernbefehl:**
-
-```bash
-samba-tool domain backup online \
-  --server="zmb-ad.amazonistan.intranet" \
-  --targetdir="/var/backups/samba-ad" \
-  --use-krb5-ccache=/root/ccache
-```
-
-**Voraussetzungen:**
-
-* Host-Keytab `/etc/krb5.keytab`
-* Kerberos-Ticket `zmb-ad$@REALM`
-* mind. 2 GB RAM + 1 GB Swap
-
-**Ergebnis:**
-
-```
-/var/backups/samba-ad/samba-backup-amazonistan.intranet-YYYY-MM-DDTHH-MM-SS.tar.bz2
-```
-
----
-
-## 🧩 Zusatzdateien
-
-**`ceph-safe-update.sh`**
-
-* führt APT-Upgrade nur bei Ceph `HEALTH_OK` aus
-* sichert gegen parallele Läufe (`flock`)
-* loggt via `syslog`
-
-**`ceph-safe-update.service`**
-
-```ini
-[Unit]
-Description=Ceph-safe APT upgrade
-After=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/ceph-safe-update.sh
-```
-
-**`ceph-safe-update.timer`**
-
-```ini
-[Timer]
-OnCalendar=Sun *-*-* 03:30:00
-Persistent=true
-```
-
----
-
-## 🔄 Empfohlene Reihenfolge
-
-```
-01_prepare_environment
-02_install_zamba
-03_join_domain
-04_replicate_drs
-05_dns_health
-06_sysvol_key_and_rsync
-07_ad_health_report
-08_snapshot_and_upgrade
-09_ceph_safe_update
-10_pve_auto_upgrades_guard
-11_preupdate_health_gate
-12_pre_update_hooks
-13_post_update_webhook
-14_ad_backup
-```
-
----
-
-## 🧾 Versionen
-
-| Version | Datum      | Änderungen                            |
-| ------- | ---------- | ------------------------------------- |
-| v1.0    | 2025-10-10 | Grundaufbau (Zamba Setup)             |
-| v1.2    | 2025-10-20 | SYSVOL-Rsync, Health Report           |
-| v1.3    | 2025-10-29 | Dokumentation & Struktur              |
-| v1.4    | 2025-11-03 | Webhook, Auto-Update-Guard            |
-| v1.5    | 2025-11-04 | AD-Backup, Health-Gate, Ceph-Safe Fix |
-
----
-
-> © 2025 Stephan Boerner
-> **Lizenz:** intern / nicht zur Weitergabe an Dritte
+* [`README.md`](../README.md) – Übersicht & Flowchart
+* [`CHANGELOG.md`](CHANGELOG.md) – Versionshistorie
