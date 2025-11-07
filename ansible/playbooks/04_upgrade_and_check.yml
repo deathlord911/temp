@@ -20,14 +20,18 @@
         pct start {{ item }} || true
       loop: "{{ dc_ctids }}"
 
-    # --- Bootstrap-DNS: temporär /etc/resolv.conf setzen (korrekt gequotet) ---
+# --- Bootstrap-DNS: temporäre /etc/resolv.conf setzen (symlink-safe) ---
     - name: Setze temporäre /etc/resolv.conf (Bootstrap) in jedem CT
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc "cat > /etc/resolv.conf <<'EOF'
-        search {{ ad_domain }}
-        nameserver {{ bootstrap_resolver }}
-        EOF
-        "
+      shell: >
+        pct exec {{ item }} -- bash -lc 'set -e;
+        if [ -L /etc/resolv.conf ] || [ ! -e /etc/resolv.conf ]; then rm -f /etc/resolv.conf; install -m 644 /dev/null /etc/resolv.conf; fi;
+        printf "search {{ domain }}\n" > /etc/resolv.conf;
+        {% for ns in dns_fallback %}
+        printf "nameserver {{ ns }}\n" >> /etc/resolv.conf;
+        {% endfor %}
+        cat /etc/resolv.conf'
+      args:
+        executable: /bin/bash
       loop: "{{ dc_ctids }}"
 
     - name: Warte auf Netzwerk im CT (DNS-Auflösung extern)
@@ -48,10 +52,29 @@
         fi"
       loop: "{{ dc_ctids }}"
 
-    - name: apt update & full-upgrade
-      ansible.builtin.shell: |
-        pct exec {{ item }} -- bash -lc 'apt update && apt -y full-upgrade'
+    - name: Preseed libc6 restart question (avoid prompt)
+      shell: >
+        pct exec {{ item }} -- bash -lc
+        "printf 'libc6 libraries/restart-without-asking boolean true\n' | debconf-set-selections"
+      args:
+        executable: /bin/bash
       loop: "{{ dc_ctids }}"
+
+    - name: apt update & dist-upgrade (non-interactive, lock-aware)
+      shell: >
+        pct exec {{ item }} -- bash -lc 'export DEBIAN_FRONTEND=noninteractive; export NEEDRESTART_MODE=a;
+        printf "libc6 libraries/restart-without-asking boolean true\n" | debconf-set-selections;
+        apt-get -o DPkg::Lock::Timeout=600 update &&
+        dpkg --configure -a --force-confdef --force-confold || true &&
+        apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade'
+      args:
+        executable: /bin/bash
+      loop: "{{ dc_ctids }}"
+      register: apt_run
+      retries: 3
+      delay: 30
+      until: apt_run is succeeded
+
 
     # --- resolved sauber aktivieren (wird später von Playbook 05 überschrieben) ---
     - name: resolved aktivieren & /etc/resolv.conf symlink setzen

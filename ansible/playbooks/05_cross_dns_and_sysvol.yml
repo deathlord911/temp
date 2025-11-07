@@ -1,167 +1,179 @@
+
 - name: Cross-DNS & SYSVOL Health (AD-DCs)
   hosts: localhost
   gather_facts: false
 
-  vars:
-    dc_a: { ctid: 100, hn: "zmb-ad",      ip: "192.168.100.241" }
-    dc_b: { ctid: 101, hn: "zmb-ad-join", ip: "192.168.100.242" }
-    dns_fallback: "1.1.1.1"
+  # Erwartet werden folgende Variablen in group_vars/all.yml:
+  # - domain: "amazonistan.intranet"
+  # - dns_fallback:
+  #     nameservers: ["1.1.1.1", "9.9.9.9"]
+  #     search: "amazonistan.intranet"
+  # - dc_a / dc_b mit ctid, hn, ip (werden unten zu dcs zusammengeführt)
 
-  handlers:
-    - name: Restart Samba
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc 'systemctl restart samba-ad-dc 2>/dev/null || systemctl restart samba 2>/dev/null || true'
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
+  vars:
+    # aus dc_a/dc_b eine Schleifenstruktur bauen
+    dcs:
+      - "{{ dc_a }}"
+      - "{{ dc_b }}"
+
+  pre_tasks:
+    - name: Zeige verwendete Domain & DNS-Fallback
+      debug:
+        msg:
+          - "Domain: {{ domain }}"
+          - "Fallback NS: {{ dns_fallback.nameservers | default([]) | join(', ') }}"
+          - "Search: {{ dns_fallback.search | default(domain) }}"
 
   tasks:
-    # --------------------------------------------------------------------------------------
-    # 0) Container sicher starten
-    # --------------------------------------------------------------------------------------
+    # ------------------------------------------------------------------------------------------
+    # 0) Sicherstellen, dass beide CTs laufen
+    # ------------------------------------------------------------------------------------------
     - name: "Stelle sicher, dass beide DC-Container laufen"
-      ansible.builtin.shell: "pct start {{ item.ctid }} || true"
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
+      shell: |
+        if ! pct status {{ item.ctid }} | grep -q running; then
+          pct start {{ item.ctid }}
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ dcs }}"
+      changed_when: "'running' not in (lookup('pipe', 'pct status ' ~ item.ctid) | default(''))"
 
-    # --------------------------------------------------------------------------------------
-    # 1) Bootstrap: Internet-DNS muss funktionieren
-    # --------------------------------------------------------------------------------------
-    - name: "Warte auf funktionierende Internetauflösung in beiden CTs"
-      ansible.builtin.shell: "pct exec {{ item.ctid }} -- bash -lc 'getent hosts deb.debian.org'"
-      register: dns_bootstrap
+    # ------------------------------------------------------------------------------------------
+    # 1) Fallback-DNS + Suchdomäne robust direkt am CT setzen (wirkt in /etc/resolv.conf)
+    #    -> nutzt die Proxmox-API (pct set), vermeidet Argument-Parsing-Fehler per Komma
+    # ------------------------------------------------------------------------------------------
+    - name: "Setze Fallback-DNS & Suchdomäne per pct set"
+      shell: >
+        pct set {{ item.ctid }}
+        -nameserver {{ dns_fallback.nameservers | join(',') }}
+        -searchdomain {{ dns_fallback.search | default(domain) }}
+      args:
+        executable: /bin/bash
+      loop: "{{ dcs }}"
+      changed_when: false
+
+    - name: "Reboote CTs, damit DNS/Resolver sicher greift"
+      shell: "pct reboot {{ item.ctid }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ dcs }}"
+      changed_when: true
+
+    # ------------------------------------------------------------------------------------------
+    # 2) Warte bis Internet-DNS-Auflösung in beiden CTs funktioniert
+    # ------------------------------------------------------------------------------------------
+    - name: "Warte auf funktionierende Internetauflösung in beiden CTs (getent deb.debian.org)"
+      shell: "pct exec {{ item.ctid }} -- bash -lc 'getent hosts deb.debian.org'"
+      args:
+        executable: /bin/bash
+      register: dns_wait
       retries: 15
       delay: 2
-      until: dns_bootstrap.rc == 0
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
+      until: dns_wait.rc == 0
+      loop: "{{ dcs }}"
 
-    # --------------------------------------------------------------------------------------
-    # 2) Prüfen, ob systemd-resolved vorhanden ist
-    # --------------------------------------------------------------------------------------
-    - name: "Prüfe, ob systemd-resolved im CT existiert"
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc 'if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^systemd-resolved.service"; then echo yes; else echo no; fi'
-      register: has_resolved
+    # ------------------------------------------------------------------------------------------
+    # 3) Cross-DNS-Checks: jeder DC fragt explizit beim jeweils anderen DC an
+    # ------------------------------------------------------------------------------------------
+    - name: "Bestimme Peer-Reihenfolge (A->B, B->A) für Cross-DNS"
+      set_fact:
+        cross_pairs:
+          - src: "{{ dc_a }}"
+            dst: "{{ dc_b }}"
+          - src: "{{ dc_b }}"
+            dst: "{{ dc_a }}"
+
+    - name: "Cross-DNS: Internet-Name via PEER-DNS (dig @peer deb.debian.org A)"
+      shell: >
+        pct exec {{ item.src.ctid }} -- bash -lc
+        "dig +time=2 +retry=1 @{{ item.dst.ip }} deb.debian.org A | sed -n '1,30p'"
+      args:
+        executable: /bin/bash
+      register: dig_peer
+      failed_when: false
+      loop: "{{ cross_pairs }}"
+
+    - name: "Cross-DNS: AD-SRV via PEER-DNS (host -t SRV _ldap._tcp.DOMAIN @peer)"
+      shell: >
+        pct exec {{ item.src.ctid }} -- bash -lc
+        "host -t SRV _ldap._tcp.{{ domain }} {{ item.dst.ip }}"
+      args:
+        executable: /bin/bash
+      register: srv_peer
+      failed_when: false
+      loop: "{{ cross_pairs }}"
+
+    # ------------------------------------------------------------------------------------------
+    # 4) SYSVOL-Prüfung
+    # ------------------------------------------------------------------------------------------
+    - name: "SYSVOL vorhanden?"
+      shell: >
+        pct exec {{ item.ctid }} -- bash -lc
+        "test -d /var/lib/samba/sysvol/{{ domain }} && echo OK || echo MISSING"
+      args:
+        executable: /bin/bash
+      register: sysvol_check
+      loop: "{{ dcs }}"
       changed_when: false
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
-      loop_control:
-        label: "{{ item.ctid }}"
 
-    # --------------------------------------------------------------------------------------
-    # 3) Cross-DNS via systemd-resolved (falls vorhanden)
-    # --------------------------------------------------------------------------------------
-    - name: "Cross-DNS via systemd-resolved (DC-A → DC-B)"
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc 'set -e; mkdir -p /etc/systemd; rm -f /etc/systemd/resolved.conf; \
-          printf "%s\n" "[Resolve]" > /etc/systemd/resolved.conf; \
-          printf "%s\n" "DNS={{ dc_b.ip }} {{ dns_fallback }}" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "Domains=~{{ dc_a.hn }}.amazonistan.intranet amazonistan.intranet" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "Cache=yes" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "DNSStubListener=yes" >> /etc/systemd/resolved.conf; \
-          ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true; \
-          systemctl restart systemd-resolved || true'
-      when: has_resolved.results[0].stdout.strip() == "yes"
+    # ------------------------------------------------------------------------------------------
+    # 5) Zusammenfassung ausgeben
+    # ------------------------------------------------------------------------------------------
+    - name: "Cross-DNS & SYSVOL Zusammenfassung"
+      debug:
+        msg:
+          - "dig @peer Ergebnisse:"
+          - "{{ dig_peer.results | map(attribute='stdout') | list }}"
+          - "SRV @peer Ergebnisse:"
+          - "{{ srv_peer.results | map(attribute='stdout') | list }}"
+          - "SYSVOL Checks:"
+          - >-
+            {{
+              dict(dcs | map(attribute='hn') |
+              list | zip(sysvol_check.results | map(attribute='stdout') | list))
+            }}
 
-    - name: "Cross-DNS via systemd-resolved (DC-B → DC-A)"
-      ansible.builtin.shell: |
-        pct exec {{ dc_b.ctid }} -- bash -lc 'set -e; mkdir -p /etc/systemd; rm -f /etc/systemd/resolved.conf; \
-          printf "%s\n" "[Resolve]" > /etc/systemd/resolved.conf; \
-          printf "%s\n" "DNS={{ dc_a.ip }} {{ dns_fallback }}" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "Domains=~{{ dc_b.hn }}.amazonistan.intranet amazonistan.intranet" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "Cache=yes" >> /etc/systemd/resolved.conf; \
-          printf "%s\n" "DNSStubListener=yes" >> /etc/systemd/resolved.conf; \
-          ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf || true; \
-          systemctl restart systemd-resolved || true'
-      when: has_resolved.results[1].stdout.strip() == "yes"
 
-    # --------------------------------------------------------------------------------------
-    # 4) Fallback ohne systemd-resolved: resolv.conf direkt & idempotent + Schutz
-    # --------------------------------------------------------------------------------------
-    - name: "Cross-DNS ohne systemd-resolved (DC-A → DC-B)"
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          set -e
-          chattr -i /etc/resolv.conf 2>/dev/null || true
-          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
-          install -m 0644 /dev/null /etc/resolv.conf
-          printf "%s\n" "search amazonistan.intranet" "nameserver {{ dc_b.ip }}" "nameserver {{ dns_fallback }}" > /etc/resolv.conf
-          chattr +i /etc/resolv.conf 2>/dev/null || true
-        '
-      when:
-        - has_resolved.results[0].stdout.strip() == "no"
-        - dns_fallback != dc_b.ip
 
-    - name: "Cross-DNS ohne systemd-resolved (DC-B → DC-A)"
-      ansible.builtin.shell: |
-        pct exec {{ dc_b.ctid }} -- bash -lc '
-          set -e
-          chattr -i /etc/resolv.conf 2>/dev/null || true
-          [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true
-          install -m 0644 /dev/null /etc/resolv.conf
-          printf "%s\n" "search amazonistan.intranet" "nameserver {{ dc_a.ip }}" "nameserver {{ dns_fallback }}" > /etc/resolv.conf
-          chattr +i /etc/resolv.conf 2>/dev/null || true
-        '
-      when:
-        - has_resolved.results[1].stdout.strip() == "no"
-        - dns_fallback != dc_a.ip
 
-    # --------------------------------------------------------------------------------------
-    # 5) Samba DNS-Forwarder setzen + Handler triggern
-    # --------------------------------------------------------------------------------------
-    - name: "Setze dns forwarder in smb.conf (beide DCs)"
-      ansible.builtin.shell: |
+# ------------------------------------------------------------
+# Ensure Samba DNS forwarders on both DCs (idempotent helper)
+# ------------------------------------------------------------
+- name: Ensure Samba DNS forwarders on DC A and B
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dc_list:
+      - "{{ dc_a }}"
+      - "{{ dc_b }}"
+    forwarder_line: "dns forwarder = 1.1.1.1 9.9.9.9"
+
+  tasks:
+    - name: Ensure forwarder line present in smb.conf and restart samba-ad-dc if changed
+      shell: >
         pct exec {{ item.ctid }} -- bash -lc '
           set -e
-          smb=/etc/samba/smb.conf
-          [ -f "$smb" ] || exit 0
-          if grep -Eq "^[[:space:]]*dns[[:space:]]+forwarder[[:space:]]*=" "$smb"; then
-            sed -i -E "s#^[[:space:]]*dns[[:space:]]+forwarder[[:space:]]*=.*#    dns forwarder = {{ dns_fallback }}#" "$smb"
+          fline="{{ forwarder_line }}"
+          if ! grep -Eq "^[[:space:]]*dns[[:space:]]+forwarder[[:space:]]*=[[:space:]]*1\.1\.1\.1[[:space:]]+9\.9\.9\.9" /etc/samba/smb.conf; then
+            awk -v ins="$fline" "
+              BEGIN{done=0}
+              /^\[global\]/{print; print ins; done=1; next}
+              {print}
+              END{if(!done) print \"[global]\n\" ins}
+            " /etc/samba/smb.conf > /tmp/smb.conf.new
+            mv /tmp/smb.conf.new /etc/samba/smb.conf
+            systemctl restart samba-ad-dc
+            echo updated
           else
-            printf "%s\n" "    dns forwarder = {{ dns_fallback }}" >> "$smb"
+            echo ok
           fi
         '
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
-      notify: Restart Samba
+      args:
+        executable: /bin/bash
+      loop: "{{ dc_list }}"
+      register: fwd_set
 
-    # --------------------------------------------------------------------------------------
-    # 6) Verifikation: lokale Recursion & Cross-DNS Peer-Queries
-    # --------------------------------------------------------------------------------------
-    - name: "Test: Recursion am lokalen Samba-DNS"
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc 'dig +time=2 +retry=1 @127.0.0.1 deb.debian.org A >/dev/null'
-      register: dig_rec
-      failed_when: dig_rec.rc != 0
-      changed_when: false
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
-      loop_control:
-        label: "{{ item.ctid }}"
-
-    - name: "Test: DNS via Peer (A→B / B→A)"
-      ansible.builtin.shell: |
-        pct exec {{ item.src.ctid }} -- bash -lc 'dig +time=2 +retry=1 @{{ item.dst.ip }} deb.debian.org A >/dev/null'
-      register: dig_peer
-      failed_when: dig_peer.rc != 0
-      changed_when: false
-      loop:
-        - { src: "{{ dc_a }}", dst: "{{ dc_b }}" }
-        - { src: "{{ dc_b }}", dst: "{{ dc_a }}" }
-
-    - name: "Prüfe Internetauflösung nach Cross-DNS"
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc 'getent hosts deb.debian.org'
-      register: dns_final
-      retries: 10
-      delay: 1
-      until: dns_final.rc == 0
-      loop:
-        - "{{ dc_a }}"
-        - "{{ dc_b }}"
+    - name: Show forwarder outcome per DC
+      debug:
+        msg: "{{ item.item.hn }} -> {{ item.stdout | default('') }}"
+      loop: "{{ fwd_set.results }}"

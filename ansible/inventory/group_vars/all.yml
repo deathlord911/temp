@@ -5,21 +5,21 @@ domain: "amazonistan.intranet"
 
 # Fallback-DNS (reihenfolgebeachtend)
 dns_fallback:
-  - "1.1.1.1"
-  - "9.9.9.9"
+  nameservers: ["1.1.1.1", "9.9.9.9"]
+  search: "amazonistan.intranet"
 
 # Domain Controller A/B (mit Storage)
 dc_a:
   ctid: 100
   hn: "zmb-ad"
   ip: "192.168.100.241"
-  storage: "ceph-rbd"     # <-- DC A auf Ceph
+  storage: "raidpool"     # <-- DC A auf raidpool
 
 dc_b:
   ctid: 101
   hn: "zmb-ad-join"
   ip: "192.168.100.242"
-  storage: "raidpool"     # <-- DC B auf raidpool
+  storage: "ceph-rbd"     # <-- DC B auf CEPH
 
 # SYSVOL-Pfad
 sysvol_path: "/var/lib/samba/sysvol"
