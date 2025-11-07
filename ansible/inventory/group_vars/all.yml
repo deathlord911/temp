@@ -8,16 +8,18 @@ dns_fallback:
   - "1.1.1.1"
   - "9.9.9.9"
 
-# Domain Controller A/B
+# Domain Controller A/B (mit Storage)
 dc_a:
   ctid: 100
   hn: "zmb-ad"
   ip: "192.168.100.241"
+  storage: "ceph-rbd"     # <-- DC A auf Ceph
 
 dc_b:
   ctid: 101
   hn: "zmb-ad-join"
   ip: "192.168.100.242"
+  storage: "raidpool"     # <-- DC B auf raidpool
 
 # SYSVOL-Pfad
 sysvol_path: "/var/lib/samba/sysvol"

@@ -2,38 +2,50 @@
 - name: Installiere Zamba DCs mit der lxc-toolbox (auto-confirm)
   hosts: pve3
   gather_facts: false
+
   vars:
-    toolbox_dir: /root/zamba-lxc-toolbox
-    conf_dir: /root/zamba-conf
-  tasks:
+    toolbox_dir: /root/lxc-toolbox
+
+  pre_tasks:
     - name: Prüfe, ob die Toolbox vorhanden ist
-      ansible.builtin.stat:
-        path: "{{ toolbox_dir }}/install.sh"
-      register: tb
+      stat:
+        path: "{{ toolbox_dir }}/zamba-lxc"
+      register: toolbox
 
     - name: Abbrechen, falls Toolbox fehlt
-      ansible.builtin.fail:
-        msg: "Toolbox nicht gefunden unter {{ toolbox_dir }} – bitte zuerst clonen/aktualisieren."
-      when: not tb.stat.exists
+      fail:
+        msg: "lxc-toolbox fehlt unter {{ toolbox_dir }} – bitte vorher bereitstellen."
+      when: not toolbox.stat.exists
 
-    - name: Installiere zmb-ad (CT 100) – Prompts mit Enter bestätigen
-      ansible.builtin.shell: |
-        set -euo pipefail
-        cd "{{ toolbox_dir }}"
-        { printf '\n%.0s' {1..20}; } | ./install.sh -s zmb-ad -i 100 -c "{{ conf_dir }}/zmb-ad.new.conf"
-      args:
-        executable: /bin/bash
-        creates: "/etc/pve/lxc/100.conf"
-      environment:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Ceph-Storage vorhanden? (nur prüfen, wenn dc_a auf ceph-rbd soll)
+      shell: "pvesm status | awk '{print $1}' | grep -x ceph-rbd"
+      register: ceph_check
+      changed_when: false
+      failed_when: dc_a.storage == 'ceph-rbd' and ceph_check.rc != 0
 
-    - name: Installiere zmb-ad-join (CT 101) – Prompts mit Enter bestätigen
-      ansible.builtin.shell: |
-        set -euo pipefail
-        cd "{{ toolbox_dir }}"
-        { printf '\n%.0s' {1..20}; } | ./install.sh -s zmb-ad-join -i 101 -c "{{ conf_dir }}/zmb-ad-join.new.conf"
+  tasks:
+    - name: Installiere {{ dc_a.hn }} (CT {{ dc_a.ctid }}) auf {{ dc_a.storage }}
+      shell: >
+        {{ toolbox_dir }}/zamba-lxc install
+        --ctid {{ dc_a.ctid }}
+        --hostname {{ dc_a.hn }}
+        --ip {{ dc_a.ip }}
+        --domain {{ domain }}
+        --storage {{ dc_a.storage }}
+        --start
       args:
+        chdir: "{{ toolbox_dir }}"
         executable: /bin/bash
-        creates: "/etc/pve/lxc/101.conf"
-      environment:
-        DEBIAN_FRONTEND: noninteractive
+
+    - name: Installiere {{ dc_b.hn }} (CT {{ dc_b.ctid }}) auf {{ dc_b.storage }}
+      shell: >
+        {{ toolbox_dir }}/zamba-lxc install
+        --ctid {{ dc_b.ctid }}
+        --hostname {{ dc_b.hn }}
+        --ip {{ dc_b.ip }}
+        --domain {{ domain }}
+        --storage {{ dc_b.storage }}
+        --start
+      args:
+        chdir: "{{ toolbox_dir }}"
+        executable: /bin/bash
