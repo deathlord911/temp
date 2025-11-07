@@ -49,3 +49,45 @@
       args:
         chdir: "{{ toolbox_dir }}"
         executable: /bin/bash
+
+    # --- Storage & Netz nachziehen, falls install.sh es nicht gesetzt hat ---
+
+    - name: (A) sicher anhalten
+      shell: pct shutdown {{ dc_a.ctid }} --force-stop 1 || true
+      args: { executable: /bin/bash }
+
+    - name: (A) falls nicht auf ceph-rbd -> rootfs migrieren
+      shell: |
+        cur=$(pct config {{ dc_a.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
+        if [ "$cur" != "{{ dc_a.storage }}" ]; then
+          pct move-volume {{ dc_a.ctid }} rootfs {{ dc_a.storage }} --delete 1
+        fi
+      args: { executable: /bin/bash }
+
+    - name: (A) Netz & Resolver setzen (vmbr3/VLAN100/241)
+      shell: |
+        MAC=$(pct config {{ dc_a.ctid }} | sed -n 's/^net0: .*hwaddr=\([^,]*\).*/\1/p')
+        pct set {{ dc_a.ctid }} -net0 "name=eth0,bridge={{ net_bridge }},ip={{ dc_a.ip }}/{{ net_masklen }},gw={{ net_gw }},tag={{ net_vlan }},type=veth,firewall=1,hwaddr=$MAC"
+        pct set {{ dc_a.ctid }} -nameserver "{{ dns_fallback | join(" ") }}" -searchdomain {{ domain }}
+        pct start {{ dc_a.ctid }}
+      args: { executable: /bin/bash }
+
+    - name: (B) sicher anhalten
+      shell: pct shutdown {{ dc_b.ctid }} --force-stop 1 || true
+      args: { executable: /bin/bash }
+
+    - name: (B) falls nicht auf raidpool -> rootfs migrieren
+      shell: |
+        cur=$(pct config {{ dc_b.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
+        if [ "$cur" != "{{ dc_b.storage }}" ]; then
+          pct move-volume {{ dc_b.ctid }} rootfs {{ dc_b.storage }} --delete 1
+        fi
+      args: { executable: /bin/bash }
+
+    - name: (B) Netz & Resolver setzen (vmbr3/VLAN100/242)
+      shell: |
+        MAC=$(pct config {{ dc_b.ctid }} | sed -n 's/^net0: .*hwaddr=\([^,]*\).*/\1/p')
+        pct set {{ dc_b.ctid }} -net0 "name=eth0,bridge={{ net_bridge }},ip={{ dc_b.ip }}/{{ net_masklen }},gw={{ net_gw }},tag={{ net_vlan }},type=veth,firewall=1,hwaddr=$MAC"
+        pct set {{ dc_b.ctid }} -nameserver "{{ dns_fallback | join(" ") }}" -searchdomain {{ domain }}
+        pct start {{ dc_b.ctid }}
+      args: { executable: /bin/bash }
