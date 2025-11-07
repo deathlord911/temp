@@ -7,56 +7,37 @@
     toolbox_dir: /root/zamba-lxc-toolbox
 
   pre_tasks:
-    - name: Prüfe, ob die Toolbox vorhanden ist
+    - name: Prüfe, ob install.sh existiert und ausführbar ist
       stat:
         path: "{{ toolbox_dir }}/install.sh"
-      register: toolbox
-
-    - name: Abbrechen, falls Toolbox fehlt
-      fail:
-        msg: "lxc-toolbox fehlt unter {{ toolbox_dir }} – bitte vorher bereitstellen."
-      when: not toolbox.stat.exists
-
-    - name: Ceph-Storage vorhanden? (nur prüfen, wenn dc_a auf ceph-rbd soll)
-      shell: "pvesm status | awk '{print $1}' | grep -x ceph-rbd"
-      register: ceph_check
+      register: inst
       changed_when: false
-      failed_when: dc_a.storage == 'ceph-rbd' and ceph_check.rc != 0
+
+    - name: Abbrechen, falls install.sh fehlt/unerlaubt
+      fail:
+        msg: "install.sh fehlt oder ist nicht ausführbar unter {{ toolbox_dir }}/install.sh"
+      when: not inst.stat.exists or not inst.stat.mode | int(base=8) is search("..1")
 
   tasks:
-    - name: Installiere {{ dc_a.hn }} (CT {{ dc_a.ctid }}) auf {{ dc_a.storage }}
+    - name: Installiere {{ dc_a.hn }} (CT {{ dc_a.ctid }}) auf {{ dc_a.storage }} via install.sh
       shell: >
-        {{ toolbox_dir }}/install.sh install
-        --ctid {{ dc_a.ctid }}
-        --hostname {{ dc_a.hn }}
-        --ip {{ dc_a.ip }}
-        --domain {{ domain }}
-        --storage {{ dc_a.storage }}
-        --start
+        "{{ toolbox_dir }}/install.sh" -i {{ dc_a.ctid }} -s zmb-ad
       args:
-        chdir: "{{ toolbox_dir }}"
         executable: /bin/bash
 
-    - name: Installiere {{ dc_b.hn }} (CT {{ dc_b.ctid }}) auf {{ dc_b.storage }}
+    - name: Installiere {{ dc_b.hn }} (CT {{ dc_b.ctid }}) auf {{ dc_b.storage }} via install.sh
       shell: >
-        {{ toolbox_dir }}/install.sh install
-        --ctid {{ dc_b.ctid }}
-        --hostname {{ dc_b.hn }}
-        --ip {{ dc_b.ip }}
-        --domain {{ domain }}
-        --storage {{ dc_b.storage }}
-        --start
+        "{{ toolbox_dir }}/install.sh" -i {{ dc_b.ctid }} -s zmb-ad-join
       args:
-        chdir: "{{ toolbox_dir }}"
         executable: /bin/bash
 
-    # --- Storage & Netz nachziehen, falls install.sh es nicht gesetzt hat ---
+    # --- Minimales Nachziehen: Storage/Netz nur dann anpassen, wenn wirklich abweichend ---
 
-    - name: (A) sicher anhalten
+    - name: DC A anhalten (best effort)
       shell: pct shutdown {{ dc_a.ctid }} --force-stop 1 || true
       args: { executable: /bin/bash }
 
-    - name: (A) falls nicht auf ceph-rbd -> rootfs migrieren
+    - name: DC A: Rootfs-Storage prüfen/angleichen
       shell: |
         cur=$(pct config {{ dc_a.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
         if [ "$cur" != "{{ dc_a.storage }}" ]; then
@@ -64,19 +45,22 @@
         fi
       args: { executable: /bin/bash }
 
-    - name: (A) Netz & Resolver setzen (vmbr3/VLAN100/241)
+    - name: DC A: Netz und Resolver setzen (vmbr3/VLAN100/IP/GW)
       shell: |
         MAC=$(pct config {{ dc_a.ctid }} | sed -n 's/^net0: .*hwaddr=\([^,]*\).*/\1/p')
         pct set {{ dc_a.ctid }} -net0 "name=eth0,bridge={{ net_bridge }},ip={{ dc_a.ip }}/{{ net_masklen }},gw={{ net_gw }},tag={{ net_vlan }},type=veth,firewall=1,hwaddr=$MAC"
         pct set {{ dc_a.ctid }} -nameserver "{{ dns_fallback | join(" ") }}" -searchdomain {{ domain }}
-        pct start {{ dc_a.ctid }}
       args: { executable: /bin/bash }
 
-    - name: (B) sicher anhalten
+    - name: DC A starten
+      shell: pct start {{ dc_a.ctid }}
+      args: { executable: /bin/bash }
+
+    - name: DC B anhalten (best effort)
       shell: pct shutdown {{ dc_b.ctid }} --force-stop 1 || true
       args: { executable: /bin/bash }
 
-    - name: (B) falls nicht auf raidpool -> rootfs migrieren
+    - name: DC B: Rootfs-Storage prüfen/angleichen
       shell: |
         cur=$(pct config {{ dc_b.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
         if [ "$cur" != "{{ dc_b.storage }}" ]; then
@@ -84,10 +68,13 @@
         fi
       args: { executable: /bin/bash }
 
-    - name: (B) Netz & Resolver setzen (vmbr3/VLAN100/242)
+    - name: DC B: Netz und Resolver setzen (vmbr3/VLAN100/IP/GW)
       shell: |
         MAC=$(pct config {{ dc_b.ctid }} | sed -n 's/^net0: .*hwaddr=\([^,]*\).*/\1/p')
         pct set {{ dc_b.ctid }} -net0 "name=eth0,bridge={{ net_bridge }},ip={{ dc_b.ip }}/{{ net_masklen }},gw={{ net_gw }},tag={{ net_vlan }},type=veth,firewall=1,hwaddr=$MAC"
         pct set {{ dc_b.ctid }} -nameserver "{{ dns_fallback | join(" ") }}" -searchdomain {{ domain }}
-        pct start {{ dc_b.ctid }}
+      args: { executable: /bin/bash }
+
+    - name: DC B starten
+      shell: pct start {{ dc_b.ctid }}
       args: { executable: /bin/bash }
