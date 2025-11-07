@@ -9,7 +9,7 @@
   pre_tasks:
     - name: Prüfe, ob die Toolbox vorhanden ist
       stat:
-        path: "{{ toolbox_dir }}/zamba-lxc"
+        path: "{{ toolbox_dir }}/install.sh"
       register: toolbox
 
     - name: Abbrechen, falls Toolbox fehlt
@@ -26,7 +26,7 @@
   tasks:
     - name: Installiere {{ dc_a.hn }} (CT {{ dc_a.ctid }}) auf {{ dc_a.storage }}
       shell: >
-        {{ toolbox_dir }}/zamba-lxc install
+        {{ toolbox_dir }}/install.sh install
         --ctid {{ dc_a.ctid }}
         --hostname {{ dc_a.hn }}
         --ip {{ dc_a.ip }}
@@ -39,7 +39,7 @@
 
     - name: Installiere {{ dc_b.hn }} (CT {{ dc_b.ctid }}) auf {{ dc_b.storage }}
       shell: >
-        {{ toolbox_dir }}/zamba-lxc install
+        {{ toolbox_dir }}/install.sh install
         --ctid {{ dc_b.ctid }}
         --hostname {{ dc_b.hn }}
         --ip {{ dc_b.ip }}
