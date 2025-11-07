@@ -4,7 +4,7 @@
   gather_facts: false
 
   vars:
-    toolbox_dir: /root/lxc-toolbox
+    toolbox_dir: /root/zamba-lxc-toolbox
 
   pre_tasks:
     - name: Prüfe, ob die Toolbox vorhanden ist
