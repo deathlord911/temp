@@ -1,6 +1,6 @@
 ---
 - name: Erzeuge zamba-Konfigurationsdateien für beide DCs
-  hosts: controller
+  hosts: pve3
   gather_facts: false
   vars:
     outdir: /root/zamba-conf

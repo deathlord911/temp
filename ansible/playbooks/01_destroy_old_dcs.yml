@@ -1,6 +1,6 @@
 ---
 - name: (Optional) Alte DC-Container entfernen
-  hosts: controller
+  hosts: pve3
   gather_facts: false
   tasks:
     - name: Stoppe und lösche alte DC-Container
