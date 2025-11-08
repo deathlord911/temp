@@ -1,0 +1,56 @@
+# Globale Variablen für alle Playbooks
+
+# Domäne
+domain: "amazonistan.intranet"
+
+# Fallback-DNS (reihenfolgebeachtend)
+dns_fallback:
+  nameservers: ["1.1.1.1", "9.9.9.9"]
+  search: "amazonistan.intranet"
+
+# Domain Controller A/B (mit Storage)
+dc_a:
+  ctid: 100
+  hn: "zmb-ad"
+  ip: "192.168.100.241"
+  storage: "raidpool"     # <-- DC A auf raidpool
+
+dc_b:
+  ctid: 101
+  hn: "zmb-ad-join"
+  ip: "192.168.100.242"
+  storage: "ceph-rbd"     # <-- DC B auf CEPH
+
+# SYSVOL-Pfad
+sysvol_path: "/var/lib/samba/sysvol"
+
+# Rsync-Richtung für SYSVOL (06)
+# "push" = A -> B, "pull" = B -> A
+direction: "push"
+
+# Trockenlauf (nur anzeigen, nichts ändern) für 06
+dry_run: true
+
+# Snapshot & Neustart-Flags für 08
+do_snapshot: true
+restart_samba: true
+
+# --- Updates / Ceph-safe defaults ---
+updates:
+  ceph_safe:
+    allow_warn: false            # bei HEALTH_WARN NICHT updaten (true = trotzdem updaten)
+    on_calendar: "Sun *-*-* 03:30:00"  # systemd OnCalendar Zeitplan
+
+  unattended:
+    purge: false   # true = Paket 'unattended-upgrades' entfernen
+
+  gate:
+    # Mindestfreier Platz (GB) auf Wurzel- und /var-Partition
+    min_root_gb: 3
+    min_var_gb: 3
+    # Sekunden, die wir auf freie APT/Dpkg-Locks warten (Best-Effort)
+    apt_lock_timeout: 120
+    # Ceph darf WARN sein (true) — für produktive Knoten i.d.R. false
+    allow_ceph_warn: false
+    # Zeit-Sync (systemd-timesyncd/chrony/ntp) erforderlich
+    require_time_sync: true
