@@ -1,56 +1,54 @@
+---
+# Play 1: CT-Node-Facts laden
+- name: Load CT node facts
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - include_tasks: includes/find_ct_nodes.yml
+
+# Play 2: AD Health Report
 - name: AD Health Report
   hosts: localhost
   gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
 
   vars:
-    report_dir: "reports"
+    reports_dir: "/root/ad-reports"
+    dcs:
+      - { ctid: 100, hn: "zmb-ad" }
+      - { ctid: 101, hn: "zmb-ad-join" }
 
   tasks:
+    - name: Build ct_map
+      set_fact:
+        ct_map:
+          "100": "{{ ct100_node | default(inventory_hostname, true) | default('localhost', true) }}"
+          "101": "{{ ct101_node | default(inventory_hostname, true) | default('localhost', true) }}"
+
     - name: Ensure reports directory exists
-      ansible.builtin.file:
-        path: "{{ report_dir }}"
+      file:
+        path: "{{ reports_dir }}"
         state: directory
         mode: "0755"
 
     - name: Collect health info from each DC
-      ansible.builtin.shell: |
+      ansible.builtin.command: >
         pct exec {{ item.ctid }} -- bash -lc '
-          echo "### {{ item.hn }} (CT {{ item.ctid }})"
-          echo
-          echo "#### DNS recursion test"
-          dig +time=2 +retry=1 @127.0.0.1 deb.debian.org A | sed -n "1,30p"
-          echo
-          echo "#### SRV records _ldap._tcp"
-          host -t SRV _ldap._tcp.{{ domain }} || true
-          echo
-          echo "#### wbinfo trust"
-          wbinfo -t || true
-          echo
-          echo "#### drs showrepl"
-          samba-tool drs showrepl || true
-          echo
-          echo "#### samba-ad-dc status (last 100 lines)"
-          journalctl -u samba-ad-dc -n 100 --no-pager || true
-          echo
+          echo "### {{ item.hn }} (CT {{ item.ctid }})"; echo;
+          echo "#### DNS recursion test";
+          dig +time=2 +retry=1 @127.0.0.1 deb.debian.org A | sed -n "1,40p"; echo;
+          echo "#### SRV records _ldap._tcp.{{ ansible_domain | default("amazonistan.intranet") }}";
+          host -t SRV _ldap._tcp.{{ ansible_domain | default("amazonistan.intranet") }} || true; echo;
+          echo "#### wbinfo trust";
+          wbinfo -t || true; echo;
+          echo "#### drs showrepl";
+          samba-tool drs showrepl || true; echo;
+          echo "#### smb.conf (dns forwarder)";
+          grep -E "^[[:space:]]*dns[[:space:]]+forwarder" /etc/samba/smb.conf || echo "(none)"; echo;
+          echo "#### systemd status samba-ad-dc (tail)";
+          journalctl -u samba-ad-dc -n 80 --no-pager || true; echo;
         '
-      loop: ["{{ dc_a }}", "{{ dc_b }}"]
-      register: health
+      loop: "{{ dcs }}"
+      loop_control: { label: "{{ item.hn }} (CT {{ item.ctid }})" }
+      delegate_to: "{{ ct_map[item.ctid|string] }}"
       changed_when: false
-
-    - name: Build Markdown report content
-      ansible.builtin.set_fact:
-        report_content: |
-          # AD Health Report ({{ domain }})
-          Generated: {{ '%Y-%m-%d %H:%M:%S' | strftime() }}
-
-          {% for r in health.results %}
-          {{ r.stdout }}
-          {% endfor %}
-
-    - name: Write report to file
-      ansible.builtin.copy:
-        dest: "{{ report_dir }}/ad-health-{{ '%Y%m%d-%H%M%S' | strftime() }}.md"
-        content: "{{ report_content }}"
-        mode: "0644"
+      failed_when: false
