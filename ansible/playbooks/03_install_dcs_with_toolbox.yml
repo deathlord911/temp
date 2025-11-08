@@ -1,174 +1,229 @@
 ---
-- name: "Installiere Zamba DCs mit der lxc-toolbox (auto-confirm, storage-enforced, node-aware)"
+- name: Installiere Zamba DCs mit der lxc-toolbox (auto-confirm, storage-enforced, node-aware)
   hosts: pve3
   gather_facts: false
 
   vars:
     toolbox_dir: /root/zamba-lxc-toolbox
-    conf_dir: /root/zamba-conf
-    dc_a: "{{ hostvars['localhost'].dc_a | default({'ctid': 100, 'hn': 'zmb-ad', 'ip':'192.168.100.241', 'storage':'raidpool'}) }}"
-    dc_b: "{{ hostvars['localhost'].dc_b | default({'ctid': 101, 'hn': 'zmb-ad-join', 'ip':'192.168.100.242', 'storage':'ceph-rbd'}) }}"
+    config_dir: /root/zamba-conf
+    dc100_cfg: "{{ config_dir }}/zmb-ad.new.conf"
+    dc101_cfg: "{{ config_dir }}/zmb-ad-join.new.conf"
 
   pre_tasks:
-    - name: "Pruefe install.sh vorhanden"
-      ansible.builtin.stat:
+    - name: Pruefe install.sh vorhanden
+      stat:
         path: "{{ toolbox_dir }}/install.sh"
       register: inst
       changed_when: false
 
-    - name: "Abbrechen falls install.sh fehlt"
-      ansible.builtin.fail:
-        msg: "install.sh fehlt unter {{ toolbox_dir }} – bitte Toolbox bereitstellen."
+    - name: Abbrechen falls install.sh fehlt
+      fail:
+        msg: "install.sh nicht gefunden unter {{ toolbox_dir }} – bitte Toolbox clonen/updaten."
       when: not inst.stat.exists
 
-    - name: "Pruefe Konfigdateien aus 02 (zmb-ad.new.conf / zmb-ad-join.new.conf)"
-      ansible.builtin.stat:
+    - name: Pruefe Konfigdateien aus 02 (zmb-ad.new.conf / zmb-ad-join.new.conf)
+      stat:
         path: "{{ item }}"
       loop:
-        - "{{ conf_dir }}/zmb-ad.new.conf"
-        - "{{ conf_dir }}/zmb-ad-join.new.conf"
-      register: confs
+        - "{{ dc100_cfg }}"
+        - "{{ dc101_cfg }}"
+      register: cfg
       changed_when: false
 
-    - name: "Abbrechen falls Konfigs fehlen"
-      ansible.builtin.fail:
-        msg: "Konfigdateien in {{ conf_dir }} fehlen (zmb-ad.new.conf / zmb-ad-join.new.conf)."
-      when: "not (confs.results | map(attribute='stat.exists') | list | min)"
-
-    - name: "Finde CT100 Configpfad clusterweit"
-      ansible.builtin.shell: "ls -d /etc/pve/nodes/*/lxc/{{ dc_a.ctid }}.conf 2>/dev/null | head -n1"
-      register: ct100_path
-      changed_when: false
-
-    - name: "Finde CT101 Configpfad clusterweit"
-      ansible.builtin.shell: "ls -d /etc/pve/nodes/*/lxc/{{ dc_b.ctid }}.conf 2>/dev/null | head -n1"
-      register: ct101_path
-      changed_when: false
-
-    - name: "Setze Node-Facts (leer falls nicht vorhanden)"
-      ansible.builtin.set_fact:
-        ct100_exists: "{{ (ct100_path.stdout | length) > 0 }}"
-        ct101_exists: "{{ (ct101_path.stdout | length) > 0 }}"
-        ct100_node: "{{ (ct100_path.stdout | regex_findall('/nodes/([^/]+)/lxc') | first) | default(inventory_hostname) | string }}"
-        ct101_node: "{{ (ct101_path.stdout | regex_findall('/nodes/([^/]+)/lxc') | first) | default(inventory_hostname) | string }}"
+    - name: Abbrechen falls Konfigs fehlen
+      fail:
+        msg: "Konfig fehlt: {{ item.stat.path }} – bitte Playbook 02_create_dc_configs.yml laufen lassen."
+      loop: "{{ cfg.results }}"
+      when: not item.stat.exists
 
   tasks:
-    - name: "Installiere {{ dc_a.hn }} CT{{ dc_a.ctid }} via install.sh nur wenn nicht vorhanden"
+    #########################################################################
+    # Clusterweit CT-Node finden (arbeitet nur auf pve3, liest /etc/pve)
+    #########################################################################
+    - name: Finde CT100 Configpfad clusterweit
+      ansible.builtin.shell: "set -e; f=/etc/pve; p=$(find \"$f/nodes\" -maxdepth 3 -type f -path '*/lxc/100.conf' -print -quit); echo \"${p:-none}\""
+      changed_when: false
+      register: ct100_path
+
+    - name: Finde CT101 Configpfad clusterweit
+      ansible.builtin.shell: "set -e; f=/etc/pve; p=$(find \"$f/nodes\" -maxdepth 3 -type f -path '*/lxc/101.conf' -print -quit); echo \"${p:-none}\""
+      changed_when: false
+      register: ct101_path
+
+    - name: Setze Node-Facts (leer falls nicht vorhanden)
+      set_fact:
+        ct100_node: "{{ (ct100_path.stdout | regex_findall('/nodes/([^/]+)/lxc', '\\1')) | first | default('pve3') }}"
+        ct101_node: "{{ (ct101_path.stdout | regex_findall('/nodes/([^/]+)/lxc', '\\1')) | first | default('pve3') }}"
+
+    #########################################################################
+    # Falls CTs fehlen: installieren (idempotent)
+    #########################################################################
+    - name: Check ob CT100 existiert
+      ansible.builtin.shell: "pct status 100"
+      register: ct100_cfg_exist
+      changed_when: false
+      failed_when: false
+
+    - name: Check ob CT101 existiert
+      ansible.builtin.shell: "pct status 101"
+      register: ct101_cfg_exist
+      changed_when: false
+      failed_when: false
+
+    - name: Installiere zmb-ad CT100 via install.sh nur wenn nicht vorhanden
       ansible.builtin.shell: >
-        ./install.sh -i {{ dc_a.ctid }} -s zmb-ad -c "{{ conf_dir }}/zmb-ad.new.conf"
-      args:
-        executable: /bin/bash
-        chdir: "{{ toolbox_dir }}"
-      when: not ct100_exists
+        "{{ toolbox_dir }}/install.sh" -i 100 -s zmb-ad -c "{{ dc100_cfg }}"
+      args: { executable: /bin/bash, chdir: "{{ toolbox_dir }}" }
+      when: ct100_cfg_exist.rc != 0
 
-    - name: "Installiere {{ dc_b.hn }} CT{{ dc_b.ctid }} via install.sh nur wenn nicht vorhanden"
+    - name: Installiere zmb-ad-join CT101 via install.sh nur wenn nicht vorhanden
       ansible.builtin.shell: >
-        ./install.sh -i {{ dc_b.ctid }} -s zmb-ad-join -c "{{ conf_dir }}/zmb-ad-join.new.conf"
-      args:
-        executable: /bin/bash
-        chdir: "{{ toolbox_dir }}"
-      when: not ct101_exists
+        "{{ toolbox_dir }}/install.sh" -i 101 -s zmb-ad-join -c "{{ dc101_cfg }}"
+      args: { executable: /bin/bash, chdir: "{{ toolbox_dir }}" }
+      when: ct101_cfg_exist.rc != 0
 
-    - name: "Refresh CT-Nodes nach Installation"
-      block:
-        - ansible.builtin.shell: "ls -d /etc/pve/nodes/*/lxc/{{ dc_a.ctid }}.conf 2>/dev/null | head -n1"
-          register: ct100_path2
-          changed_when: false
-        - ansible.builtin.shell: "ls -d /etc/pve/nodes/*/lxc/{{ dc_b.ctid }}.conf 2>/dev/null | head -n1"
-          register: ct101_path2
-          changed_when: false
-        - ansible.builtin.set_fact:
-            ct100_node: "{{ (ct100_path2.stdout | regex_findall('/nodes/([^/]+)/lxc') | first) | default(ct100_node) | string }}"
-            ct101_node: "{{ (ct101_path2.stdout | regex_findall('/nodes/([^/]+)/lxc') | first) | default(ct101_node) | string }}"
+    #########################################################################
+    # Proxmox 9 HA: vor Storage-Aktionen Services entfernen (Error-State räumen)
+    #########################################################################
+    - name: HA: Service für CT100/CT101 entfernen (PVE9: keine Gruppen)
+      ansible.builtin.shell: |
+        set -e
+        for id in 100 101; do
+          if ha-manager status | awk '{print $1}' | grep -qx "ct:${id}"; then
+            ha-manager remove ct:${id} || true
+            echo "removed ct:${id}"
+          else
+            echo "absent ct:${id}"
+          fi
+        done
+      args: { executable: /bin/bash }
+      changed_when: "'removed ct:' in stdout"
 
-    # --- Storage-Enforcement: CT100 -> raidpool (ohne mp0), CT101 -> ceph-rbd + mp0=/backup ---
-    - name: "CT100 stoppen (best effort)"
-      ansible.builtin.shell: "pct stop {{ dc_a.ctid }} || true"
+    #########################################################################
+    # Storage-Enforcement
+    # - CT100 -> raidpool (ohne mp0)
+    # - CT101 -> ceph-rbd (rootfs) + mp0=/backup auf ceph-rbd
+    #########################################################################
+
+    # --- CT100 auf seinem Node ---
+    - name: CT100 stoppen (best effort)
+      ansible.builtin.shell: "pct status 100 | grep -q running && pct shutdown 100 || true ; sleep 1"
       args: { executable: /bin/bash }
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "CT100 Snapshots loeschen (falls vorhanden)"
+    - name: CT100 Snapshots loeschen (falls vorhanden)
       ansible.builtin.shell: |
         set -e
-        if pct listsnapshot {{ dc_a.ctid }} >/dev/null 2>&1; then
-          pct listsnapshot {{ dc_a.ctid }} | awk 'NR>1{print $1}' | xargs -r -I{} pct delsnapshot {{ dc_a.ctid }} {}
+        if pct listsnapshot 100 >/dev/null 2>&1; then
+          pct listsnapshot 100 | awk 'NR>1{print $1}' | xargs -r -I{} pct delsnapshot 100 {}
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "CT100 Rootfs-Storage pruefen/angleichen (soll raidpool)"
+    - name: CT100 Rootfs-Storage pruefen/angleichen (soll raidpool)
       ansible.builtin.shell: |
         set -e
-        cur=$(pct config {{ dc_a.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
+        cur=$(pct config 100 | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
         if [ "$cur" != "raidpool" ]; then
-          pct move-volume {{ dc_a.ctid }} rootfs raidpool --delete 1
+          pct move-volume 100 rootfs raidpool --delete 1
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "CT100 mp0 entfernen (falls vorhanden)"
+    - name: CT100 mp0 entfernen (falls vorhanden)
       ansible.builtin.shell: |
         set -e
-        if pct config {{ dc_a.ctid }} | grep -q '^mp0:'; then
-          pct set {{ dc_a.ctid }} -mp0 0
+        if pct config 100 | grep -q '^mp0:'; then
+          pct set 100 -mp0 0
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "CT100 starten"
-      ansible.builtin.shell: "pct start {{ dc_a.ctid }} || true"
+    - name: CT100 starten
+      ansible.builtin.shell: "pct status 100 | grep -q running || pct start 100"
       args: { executable: /bin/bash }
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "CT101 stoppen (best effort)"
-      ansible.builtin.shell: "pct stop {{ dc_b.ctid }} || true"
+    # --- CT101 auf seinem Node ---
+    - name: CT101 stoppen (best effort)
+      ansible.builtin.shell: "pct status 101 | grep -q running && pct shutdown 101 || true ; sleep 1"
       args: { executable: /bin/bash }
       delegate_to: "{{ ct101_node | string }}"
 
-    - name: "CT101 Snapshots loeschen (falls vorhanden)"
+    - name: CT101 Snapshots loeschen (falls vorhanden)
       ansible.builtin.shell: |
         set -e
-        if pct listsnapshot {{ dc_b.ctid }} >/dev/null 2>&1; then
-          pct listsnapshot {{ dc_b.ctid }} | awk 'NR>1{print $1}' | xargs -r -I{} pct delsnapshot {{ dc_b.ctid }} {}
+        if pct listsnapshot 101 >/dev/null 2>&1; then
+          pct listsnapshot 101 | awk 'NR>1{print $1}' | xargs -r -I{} pct delsnapshot 101 {}
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct101_node | string }}"
 
-    - name: "CT101 Rootfs-Storage pruefen/angleichen (soll ceph-rbd)"
+    - name: CT101 Rootfs-Storage pruefen/angleichen (soll ceph-rbd)
       ansible.builtin.shell: |
         set -e
-        cur=$(pct config {{ dc_b.ctid }} | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
+        cur=$(pct config 101 | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
         if [ "$cur" != "ceph-rbd" ]; then
-          pct move-volume {{ dc_b.ctid }} rootfs ceph-rbd --delete 1
+          pct move-volume 101 rootfs ceph-rbd --delete 1
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct101_node | string }}"
 
-    - name: "CT101 mp0 auf /backup (ceph-rbd, 256G) sicherstellen"
+    - name: CT101 wirklich stoppen (hart, falls nötig)
+      ansible.builtin.shell: "pct status 101 | grep -q running && pct stop 101 || true"
+      args: { executable: /bin/bash }
+      delegate_to: "{{ ct101_node | string }}"
+
+    - name: CT101 mp0 auf /backup anlegen (falls nicht vorhanden) – RBD autoprovision
       ansible.builtin.shell: |
         set -e
-        if ! pct config {{ dc_b.ctid }} | grep -q '^mp0:'; then
-          pct set {{ dc_b.ctid }} -mp0 ceph-rbd:256,mp=/backup,backup=1
+        if ! pct config 101 | grep -q '^mp0:'; then
+          pct set 101 -mp0 ceph-rbd:vm-101-disk-1,mp=/backup,backup=1,size=256G
         fi
       args: { executable: /bin/bash }
       delegate_to: "{{ ct101_node | string }}"
 
-    - name: "CT101 starten"
-      ansible.builtin.shell: "pct start {{ dc_b.ctid }} || true"
+    - name: CT101 starten
+      ansible.builtin.shell: "pct status 101 | grep -q running || pct start 101"
       args: { executable: /bin/bash }
       delegate_to: "{{ ct101_node | string }}"
 
-    - name: "Verifikation ausgeben"
+    #########################################################################
+    # Proxmox 9 HA: Services wieder hinzufügen (ohne Gruppen)
+    #########################################################################
+    - name: HA: CT100 wieder hinzufügen (ohne Gruppe)
       ansible.builtin.shell: |
-        echo "CT{{ dc_a.ctid }} (@{{ ct100_node }}):"
-        pct config {{ dc_a.ctid }} | egrep '^(rootfs:|mp0:|net0:)'
-        echo
-        echo "CT{{ dc_b.ctid }} (@{{ ct101_node }}):"
-        pct config {{ dc_b.ctid }} | egrep '^(rootfs:|mp0:|net0:)'
+        ha-manager add ct:100 --max_relocate 10 --max_restart 1 || true
+        ha-manager set ct:100 --state started || true
       args: { executable: /bin/bash }
-      register: verify_out
+      changed_when: false
+
+    - name: HA: CT101 wieder hinzufügen (ohne Gruppe)
+      ansible.builtin.shell: |
+        ha-manager add ct:101 --max_relocate 10 --max_restart 1 || true
+        ha-manager set ct:101 --state started || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    #########################################################################
+    # Verifikation je Node
+    #########################################################################
+    - name: Verifikation CT100 (@{{ ct100_node }})
+      ansible.builtin.shell: "pct config 100 | egrep '^(rootfs:|mp0:|net0:)'"
+      args: { executable: /bin/bash }
+      register: verify_ct100
       delegate_to: "{{ ct100_node | string }}"
 
-    - name: "Ausgabe Verifikation"
+    - name: Verifikation CT101 (@{{ ct101_node }})
+      ansible.builtin.shell: "pct config 101 | egrep '^(rootfs:|mp0:|net0:)'"
+      args: { executable: /bin/bash }
+      register: verify_ct101
+      delegate_to: "{{ ct101_node | string }}"
+
+    - name: Verifikation anzeigen
       ansible.builtin.debug:
-        msg: "{{ verify_out.stdout.splitlines() }}"
+        msg:
+          - "CT100:"
+          - "{{ verify_ct100.stdout_lines | default([]) }}"
+          - "CT101:"
+          - "{{ verify_ct101.stdout_lines | default([]) }}"
