@@ -8,3 +8,8 @@ __pycache__/
 *.patch
 ansible/playbooks/reports/*
 !ansible/playbooks/reports/.gitkeep
+
+# ignore backup and temp files
+*.bak*
+ansible/playbooks/_test_*.yml
+ansible/playbooks/includes/
