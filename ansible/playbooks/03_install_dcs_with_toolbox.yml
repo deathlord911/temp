@@ -74,18 +74,20 @@
       ansible.builtin.shell: >
         "{{ toolbox_dir }}/install.sh" -i 100 -s zmb-ad -c "{{ dc100_cfg }}"
       args: { executable: /bin/bash, chdir: "{{ toolbox_dir }}" }
-      when: ct100_cfg_exist.rc != 0
+      when:
+      - (ct100_node | default('')) == ''
 
     - name: Installiere zmb-ad-join CT101 via install.sh nur wenn nicht vorhanden
       ansible.builtin.shell: >
         "{{ toolbox_dir }}/install.sh" -i 101 -s zmb-ad-join -c "{{ dc101_cfg }}"
       args: { executable: /bin/bash, chdir: "{{ toolbox_dir }}" }
-      when: ct101_cfg_exist.rc != 0
+      when:
+      - (ct101_node | default('')) == ''
 
     #########################################################################
     # Proxmox 9 HA: vor Storage-Aktionen Services entfernen (Error-State räumen)
     #########################################################################
-    - name: HA: Service für CT100/CT101 entfernen (PVE9: keine Gruppen)
+    - name: "HA: Service für CT100/CT101 entfernen (PVE9: keine Gruppen)"
       ansible.builtin.shell: |
         set -e
         for id in 100 101; do
@@ -191,14 +193,14 @@
     #########################################################################
     # Proxmox 9 HA: Services wieder hinzufügen (ohne Gruppen)
     #########################################################################
-    - name: HA: CT100 wieder hinzufügen (ohne Gruppe)
+    - name: "HA: CT100 wieder hinzufügen (ohne Gruppe)"
       ansible.builtin.shell: |
         ha-manager add ct:100 --max_relocate 10 --max_restart 1 || true
         ha-manager set ct:100 --state started || true
       args: { executable: /bin/bash }
       changed_when: false
 
-    - name: HA: CT101 wieder hinzufügen (ohne Gruppe)
+    - name: "HA: CT101 wieder hinzufügen (ohne Gruppe)"
       ansible.builtin.shell: |
         ha-manager add ct:101 --max_relocate 10 --max_restart 1 || true
         ha-manager set ct:101 --state started || true
