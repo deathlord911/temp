@@ -1,17 +1,21 @@
-# Logs & Reports
-reports/logs/*.log
-
-# Python/Ansible Kleinkram
-*.retry
-__pycache__/
-# Local artifacts
-*.patch
-ansible/playbooks/reports/*
-!ansible/playbooks/reports/.gitkeep
-
-# ignore backup and temp files
-*.bak*
-ansible/playbooks/_test_*.yml
-ansible/playbooks/includes/
+# Lokale Toolboxes
 zamba-lxc-toolbox/
-/zamba-lxc-toolbox/
+
+# Python Virtualenvs
+ansible-venv/
+.venv/
+
+# Log- und Backup-Dateien
+*.log
+*.retry
+*.bak
+*.swp
+*.tmp
+
+# Reports & generierte Dateien
+ansible/playbooks/reports/
+reports/
+
+# Secrets & lokale Variablen
+ansible/vault_pass.txt
+.env
