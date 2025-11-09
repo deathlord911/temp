@@ -1,54 +1,171 @@
-- name: Snapshot & Upgrade DCs
+---
+# 1) CT-Node-Facts laden (wie in 04/05/06/07)
+- name: "Load CT node facts"
   hosts: localhost
   gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
+  any_errors_fatal: true
+  tasks:
+    - name: include_tasks
+      include_tasks: "{{ playbook_dir }}/includes/find_ct_nodes.yml"
 
-- name: Run Pre-Update Gate first
-  import_playbook: 11_preupdate_health_gate.yml
+# 2) Snapshots & Upgrades ausführen (mit robustem Fallback für Conf-Pfade)
+- name: "Snapshots & Upgrade für Zamba-DCs"
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+
   vars:
-    updates:
-      gate:
-        apt_lock_timeout: "{{ updates.gate.apt_lock_timeout | default(180) }}"
+    snapshot_prefix: "pre-upgrade"        # Basisname für Snapshots
+    snapshot_keep: 3                      # 0 = keine Aufräumung
+    apt_env: "DEBIAN_FRONTEND=noninteractive"
+    apt_cmd: >
+      apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+    upgrade_cmd: >
+      {{ apt_cmd }} dist-upgrade
 
   tasks:
-    - name: Make LXC snapshot (if enabled)
-      ansible.builtin.shell: |
-        pct snapshot {{ item.ctid }} pre-upgrade-{{ '%Y%m%d-%H%M%S' | strftime() }}
-      when: do_snapshot
-      loop: ["{{ dc_a }}", "{{ dc_b }}"]
-      changed_when: true
+    - name: "Erzeuge Timestamp"
+      shell: "date +%Y%m%d-%H%M%S"
+      register: ts
+      changed_when: false
 
-    - name: Upgrade inside CT (lock-safe, noninteractive)
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc '
-          set -e
-          export DEBIAN_FRONTEND=noninteractive
-          systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-          systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    #################################################################
+    # Fallback: Conf-Pfad/Nodename aus /etc/pve ableiten, falls leer
+    #################################################################
+    - name: "Fallback CT100 confpath ermitteln, wenn leer"
+      when: (ct100_confpath | default('')) | length == 0
+      shell: |
+        set -e
+        ls -1 /etc/pve/nodes/*/lxc/100.conf 2>/dev/null | head -n1
+      args: { executable: /bin/bash }
+      register: ct100_confpath_fallback
+      changed_when: false
+      failed_when: false
 
-          for i in {1..30}; do
-            fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break
-            sleep 1
+    - name: "Fallback CT101 confpath ermitteln, wenn leer"
+      when: (ct101_confpath | default('')) | length == 0
+      shell: |
+        set -e
+        ls -1 /etc/pve/nodes/*/lxc/101.conf 2>/dev/null | head -n1
+      args: { executable: /bin/bash }
+      register: ct101_confpath_fallback
+      changed_when: false
+      failed_when: false
+
+    - name: "Facts für CT100 aus Fallback übernehmen"
+      when:
+        - (ct100_confpath | default('')) | length == 0
+        - (ct100_confpath_fallback.stdout | default('')) | length > 0
+      set_fact:
+        ct100_confpath: "{{ ct100_confpath_fallback.stdout }}"
+        ct100_node: "{{ (ct100_confpath_fallback.stdout | dirname | dirname | basename) | default('') }}"
+
+    - name: "Facts für CT101 aus Fallback übernehmen"
+      when:
+        - (ct101_confpath | default('')) | length == 0
+        - (ct101_confpath_fallback.stdout | default('')) | length > 0
+      set_fact:
+        ct101_confpath: "{{ ct101_confpath_fallback.stdout }}"
+        ct101_node: "{{ (ct101_confpath_fallback.stdout | dirname | dirname | basename) | default('') }}"
+
+    ############################################################
+    # ct_map ohne fancy Filter inkrementell zusammenbauen
+    ############################################################
+    - name: "Init ct_map"
+      set_fact:
+        ct_map: []
+
+    - name: "Append CT100 falls vorhanden"
+      when: (ct100_confpath | default('')) | length > 0
+      set_fact:
+        ct_map: "{{ ct_map + [ {'id': 100, 'node': (ct100_node|default('')), 'conf': (ct100_confpath|default('')) } ] }}"
+
+    - name: "Append CT101 falls vorhanden"
+      when: (ct101_confpath | default('')) | length > 0
+      set_fact:
+        ct_map: "{{ ct_map + [ {'id': 101, 'node': (ct101_node|default('')), 'conf': (ct101_confpath|default('')) } ] }}"
+
+    - name: "Debug ct_map"
+      debug: { var: ct_map }
+
+    - name: "Abbrechen, wenn keine CTs gefunden wurden"
+      fail:
+        msg: "Keine DC-Container gefunden (ct_map leer)."
+      when: ct_map | length == 0
+
+    ########################################
+    # Snapshots erstellen + optionale Retain
+    ########################################
+    - name: "Erzeuge Snapshot ({{ snapshot_prefix }}-{{ ts.stdout }}) für jeden CT"
+      shell: |
+        set -e
+        pct snapshot {{ item.id }} "{{ snapshot_prefix }}-{{ ts.stdout }}" -description "Automatisch vor Upgrade (Play 08)"
+      args: { executable: /bin/bash }
+      delegate_to: "{{ item.node }}"
+      loop: "{{ ct_map }}"
+      register: snap_result
+      failed_when: false
+      changed_when: "snap_result.rc == 0"
+
+    - name: "Retention: alte Snapshots je CT auf {{ snapshot_keep }} begrenzen"
+      when: snapshot_keep | int > 0
+      shell: |
+        set -e
+        snaps="$(pct listsnapshot {{ item.id }} | awk 'NR>1{print $1}' | sort)"
+        total="$(printf '%s\n' "$snaps" | awk 'NF' | wc -l)"
+        keep="{{ snapshot_keep | int }}"
+        if [ "$total" -gt "$keep" ]; then
+          del=$(( total - keep ))
+          printf '%s\n' "$snaps" | awk 'NF' | head -n "$del" | while read -r s; do
+            [ -n "$s" ] && pct delsnapshot {{ item.id }} "$s" || true
           done
-          fuser /var/lib/dpkg/lock >/dev/null 2>&1 && pkill -9 -f "(apt|dpkg|unattended)" || true
+        fi
+      args: { executable: /bin/bash }
+      delegate_to: "{{ item.node }}"
+      loop: "{{ ct_map }}"
+      changed_when: false
+      failed_when: false
 
-          rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock /var/lib/apt/lists/lock
+    #####################
+    # Update & Upgrade
+    #####################
+    - name: "Apt Update je CT"
+      shell: |
+        pct exec {{ item.id }} -- bash -lc '{{ apt_env }} apt-get update'
+      args: { executable: /bin/bash }
+      delegate_to: "{{ item.node }}"
+      loop: "{{ ct_map }}"
+      register: apt_update
+      changed_when: false
+      failed_when: false
 
-          dpkg --configure -a || true
-          apt -y -f install || true
+    - name: "Dist-Upgrade je CT (noninteractive)"
+      shell: |
+        pct exec {{ item.id }} -- bash -lc '{{ apt_env }} {{ upgrade_cmd }}'
+      args: { executable: /bin/bash }
+      delegate_to: "{{ item.node }}"
+      loop: "{{ ct_map }}"
+      register: apt_upgrade
+      changed_when: "apt_upgrade.rc == 0"
+      failed_when: false
 
-          apt update
-          apt -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade
-        '
-      loop: ["{{ dc_a }}", "{{ dc_b }}"]
-      changed_when: true
+    #####################
+    # Dienst-Check
+    #####################
+    - name: "Nach-Check: samba-ad-dc status (kurzer Tail) je CT"
+      shell: |
+        pct exec {{ item.id }} -- bash -lc 'systemctl -q is-active samba-ad-dc && echo OK || (systemctl status --no-pager -l samba-ad-dc | tail -n 20; exit 1)'
+      args: { executable: /bin/bash }
+      delegate_to: "{{ item.node }}"
+      loop: "{{ ct_map }}"
+      register: ad_status
+      failed_when: false
+      changed_when: false
 
-    - name: Restart Samba AD-DC (optional)
-      ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc '
-          systemctl restart samba-ad-dc || true
-        '
-      when: restart_samba
-      loop: ["{{ dc_a }}", "{{ dc_b }}"]
-      changed_when: true
+    - name: "Zusammenfassung"
+      debug:
+        msg:
+          - "Snapshots erstellt: {{ snapshot_prefix }}-{{ ts.stdout }}"
+          - "Apt-Update RCs: {{ apt_update.results | map(attribute='rc') | list }}"
+          - "Upgrade    RCs: {{ apt_upgrade.results | map(attribute='rc') | list }}"
+          - "AD-Status  RCs: {{ ad_status.results | map(attribute='rc') | list }}"

@@ -1,0 +1,11 @@
+# Erwartet: var ct_id
+- name: "Find conf for CT{{ ct_id }}"
+  shell: "find /etc/pve/nodes -path '*/lxc/{{ ct_id }}.conf' -print -quit"
+  register: _conf
+  changed_when: false
+
+- name: "Set facts for CT{{ ct_id }}"
+  set_fact:
+    "ct{{ ct_id }}_confpath": "{{ (_conf.stdout | trim) | default('') }}"
+    "ct{{ ct_id }}_node": "{{ ((_conf.stdout | trim) | regex_findall('/etc/pve/nodes/([^/]+)/lxc') | first | default('')) }}"
+    "ct{{ ct_id }}_exists": "{{ (_conf.stdout | trim) | length > 0 }}"

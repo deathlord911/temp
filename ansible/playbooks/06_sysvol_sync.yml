@@ -1,147 +1,191 @@
 ---
-# Play 1: CT-Node-Facts laden
-- name: "Load CT node facts"
+# 06_sysvol_sync.yml
+#
+# SYSVOL Sync von DC A (CT100) -> DC B (CT101)
+# Dry-Run mit:  ansible-playbook 06_sysvol_sync.yml
+# Real-Run mit: ansible-playbook 06_sysvol_sync.yml -e "sysvol_dry_run=false"
+
+- name: Load CT node facts
   hosts: localhost
   gather_facts: false
   tasks:
     - include_tasks: includes/find_ct_nodes.yml
 
-# Play 2: SYSVOL Sync (DC A -> DC B)
-- name: "SYSVOL Sync (DC A -> DC B)"
+- name: SYSVOL Sync (DC A -> DC B)
   hosts: localhost
   gather_facts: false
   vars:
-    # Quelle ist „Primary“
-    dc_a: { ctid: 100, hn: "zmb-ad",      ip: "192.168.100.241" }
-    # Ziel ist „Join“
-    dc_b: { ctid: 101, hn: "zmb-ad-join", ip: "192.168.100.242" }
+    # Standardwerte – können bei Bedarf via -e überschrieben werden
+    src_ct_id: 100
+    dst_ct_id: 101
+    src_ip: "192.168.100.241"
+    dst_ip: "192.168.100.242"
     sysvol_path: "/var/lib/samba/sysvol"
-    dry_run: true
-  tasks:
-    - name: "Build ct_map"
-      set_fact:
-        ct_map:
-          "100": "{{ ct100_node | default(inventory_hostname, true) | default('localhost', true) }}"
-          "101": "{{ ct101_node | default(inventory_hostname, true) | default('localhost', true) }}"
 
-    - name: "Quelle/Ziel Variablen anzeigen"
+  tasks:
+    #################################################################
+    # ct_map bauen (IDs -> Node, Conf)
+    #################################################################
+    - name: Build ct_map
+      ansible.builtin.set_fact:
+        _ct_map: >-
+          {{
+            [
+              {'id': 100, 'node': (ct100_node | default('')), 'conf': (ct100_conf | default(''))},
+              {'id': 101, 'node': (ct101_node | default('')), 'conf': (ct101_conf | default(''))}
+            ]
+          }}
+
+    #################################################################
+    # Dry-Run Effektivwert bestimmen (Extra-Var respektieren)
+    #################################################################
+    - name: Effektiven Dry-Run-Wert berechnen (Extra-Var respektieren)
+      ansible.builtin.set_fact:
+        sysvol_dry_run_effective: "{{ (sysvol_dry_run | default(true)) | bool }}"
+
+    - name: Quelle/Ziel Variablen anzeigen
       ansible.builtin.debug:
         msg:
-          - "SRC: {{ dc_a.hn }} (CT {{ dc_a.ctid }}, IP {{ dc_a.ip }})"
-          - "DST: {{ dc_b.hn }} (CT {{ dc_b.ctid }}, IP {{ dc_b.ip }})"
-          - "SYSVOL: {{ sysvol_path }}, dry_run={{ dry_run }}"
+          - "SRC: zmb-ad (CT {{ src_ct_id }}, IP {{ src_ip }})"
+          - "DST: zmb-ad-join (CT {{ dst_ct_id }}, IP {{ dst_ip }})"
+          - "SYSVOL: {{ sysvol_path }}, dry_run={{ sysvol_dry_run_effective | ternary('True','False') }}"
 
-    - name: "Prüfen, ob Quelle läuft"
-      ansible.builtin.command: >
-        pct status {{ dc_a.ctid }}
-      delegate_to: "{{ ct_map[dc_a.ctid|string] }}"
-      changed_when: false
-      failed_when: false
-
-    - name: "Prüfen, ob Ziel läuft"
-      ansible.builtin.command: >
-        pct status {{ dc_b.ctid }}
-      delegate_to: "{{ ct_map[dc_b.ctid|string] }}"
-      changed_when: false
-      failed_when: false
-
-    # Dry-Run: nur anzeigen
-    - name: "SYSVOL Vergleich (Dry-Run simuliert)"
-      ansible.builtin.shell: >
-        echo "Would sync {{ sysvol_path }} from CT{{ dc_a.ctid }} -> CT{{ dc_b.ctid }} (dry_run={{ dry_run }})"
-      args:
-        executable: /bin/bash
-      delegate_to: "{{ inventory_hostname }}"
-      changed_when: false
-      when: dry_run | bool
-
-    #########################################################################
-    # SYSVOL Pull: CT101 zieht von CT100 (rsync über SSH)
-    #########################################################################
-    - name: "Ensure rsync + ssh-client on CT101"
+    #################################################################
+    # Läuft Quelle/Ziel?
+    #################################################################
+    - name: "Prüfen, ob Quelle (CT {{ src_ct_id }}) läuft"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',src_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        set -e
-        pct exec 101 -- bash -lc '
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -y
-          apt-get install -y rsync openssh-client'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
+        set -euo pipefail
+        pct status {{ src_ct_id }} | grep -q "status: running"
+      register: _src_running
       changed_when: false
-      failed_when: false
 
-    - name: "Create SSH key on CT101 if absent"
+    - name: "Prüfen, ob Ziel (CT {{ dst_ct_id }}) läuft"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 101 -- bash -lc '
-          umask 077
+        set -euo pipefail
+        pct status {{ dst_ct_id }} | grep -q "status: running"
+      register: _dst_running
+      changed_when: false
+
+    #################################################################
+    # rsync/ssh-client sicherstellen (Ziel + Quelle)
+    #################################################################
+    - name: "Ensure rsync + ssh-client present on CT {{ dst_ct_id }}"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc '
+          if ! command -v rsync >/dev/null 2>&1 || ! dpkg -s openssh-client >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y --no-install-recommends rsync openssh-client
+          fi
+        '
+      register: _rsync_install_dst
+      changed_when: _rsync_install_dst.stdout is search("install") or _rsync_install_dst.stdout is search("Setting up")
+
+    - name: "Ensure rsync present on source CT {{ src_ct_id }}"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',src_ct_id) | first).node }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct exec {{ src_ct_id }} -- bash -lc '
+          if ! command -v rsync >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y --no-install-recommends rsync
+          fi
+        '
+      register: _rsync_install_src
+      changed_when: _rsync_install_src.stdout is search("install") or _rsync_install_src.stdout is search("Setting up")
+
+    #################################################################
+    # SSH-Trust: Key im Ziel erzeugen, auf Quelle autorisieren
+    #################################################################
+    - name: "Create SSH key on CT {{ dst_ct_id }} if absent"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc '
           mkdir -p /root/.ssh
-          [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
-      changed_when: false
-      failed_when: false
+          chmod 700 /root/.ssh
+          if [ ! -f /root/.ssh/id_ed25519 ]; then
+            ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
+          fi
+        '
+      register: _create_key_dst
+      changed_when: "'Generating public/private ed25519 key pair' in _create_key_dst.stdout"
 
-    - name: "Read CT101 pubkey"
-      ansible.builtin.command: >
-        pct exec 101 -- bash -lc 'cat /root/.ssh/id_ed25519.pub'
-      delegate_to: "{{ ct_map['101'] }}"
-      register: ct101_pub
-      changed_when: false
-
-    - name: "Authorize CT101 pubkey on CT100"
+    - name: "Read CT {{ dst_ct_id }} pubkey"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 100 -- bash -lc '
-          umask 077
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc 'cat /root/.ssh/id_ed25519.pub'
+      register: _dst_pubkey
+      changed_when: false
+
+    - name: "Authorize CT {{ dst_ct_id }} pubkey on CT {{ src_ct_id }}"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',src_ct_id) | first).node }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct exec {{ src_ct_id }} -- bash -lc '
           mkdir -p /root/.ssh
+          chmod 700 /root/.ssh
           touch /root/.ssh/authorized_keys
-          grep -qxF "{{ ct101_pub.stdout | trim }}" /root/.ssh/authorized_keys || echo "{{ ct101_pub.stdout | trim }}" >> /root/.ssh/authorized_keys'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['100'] }}"
+          chmod 600 /root/.ssh/authorized_keys
+          if ! grep -Fxq "{{ _dst_pubkey.stdout | trim }}" /root/.ssh/authorized_keys; then
+            echo "{{ _dst_pubkey.stdout | trim }}" >> /root/.ssh/authorized_keys
+          fi
+        '
       changed_when: false
-      failed_when: false
 
-    - name: "Populate known_hosts on CT101"
+    - name: "Populate known_hosts on CT {{ dst_ct_id }}"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 101 -- bash -lc '
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc '
           mkdir -p /root/.ssh
-          touch /root/.ssh/known_hosts
-          ssh-keygen -F {{ dc_a.ip }} >/dev/null 2>&1 || ssh-keyscan -H {{ dc_a.ip }} >> /root/.ssh/known_hosts
-          chmod 600 /root/.ssh/known_hosts'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
+          chmod 700 /root/.ssh
+          ssh-keyscan -T 5 {{ src_ip }} >> /root/.ssh/known_hosts 2>/dev/null || true
+          sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts || true
+        '
       changed_when: false
-      failed_when: false
 
-    - name: "Ensure destination sysvol dir exists on CT101"
+    #################################################################
+    # Zielpfad sicherstellen
+    #################################################################
+    - name: "Ensure destination sysvol dir exists on CT {{ dst_ct_id }}"
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 101 -- bash -lc 'mkdir -p {{ sysvol_path | default("/var/lib/samba/sysvol") }}'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc 'mkdir -p {{ sysvol_path }}'
       changed_when: false
-      failed_when: false
 
-    # ---- Dry-Run (Vorschau) ----
-    - name: "SYSVOL Pull (DRY-RUN): CT101 <- CT100"
-      when: dry_run | default(true) | bool
+    #################################################################
+    # DRY-RUN (nur wenn gewünscht)
+    #################################################################
+    - name: "SYSVOL Pull (DRY-RUN): CT {{ dst_ct_id }} <- CT {{ src_ct_id }}"
+      when: sysvol_dry_run_effective | bool
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 101 -- bash -lc '
-          rsync -aHAXx --delete --numeric-ids --dry-run \
-            root@{{ dc_a.ip }}:{{ sysvol_path | default("/var/lib/samba/sysvol") }}/ \
-            {{ sysvol_path | default("/var/lib/samba/sysvol") }}/'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc '
+          rsync -av --delete -e "ssh -o StrictHostKeyChecking=no" \
+            root@{{ src_ip }}:{{ sysvol_path }}/ {{ sysvol_path }}/
+        '
+      register: _dry_run
       changed_when: false
-      failed_when: false
 
-    # ---- Echter Sync ----
-    - name: "SYSVOL Pull (REAL): CT101 <- CT100"
-      when: not (dry_run | default(true) | bool)
+    #################################################################
+    # REAL-Sync (wenn nicht Dry-Run)
+    #################################################################
+    - name: "SYSVOL Pull (REAL): CT {{ dst_ct_id }} <- CT {{ src_ct_id }}"
+      when: not (sysvol_dry_run_effective | bool)
+      delegate_to: "{{ (_ct_map | selectattr('id','equalto',dst_ct_id) | first).node }}"
       ansible.builtin.shell: |
-        pct exec 101 -- bash -lc '
-          rsync -aHAXx --delete --numeric-ids \
-            root@{{ dc_a.ip }}:{{ sysvol_path | default("/var/lib/samba/sysvol") }}/ \
-            {{ sysvol_path | default("/var/lib/samba/sysvol") }}/'
-      args: { executable: /bin/bash }
-      delegate_to: "{{ ct_map['101'] }}"
+        set -euo pipefail
+        pct exec {{ dst_ct_id }} -- bash -lc '
+          rsync -a --delete -e "ssh -o StrictHostKeyChecking=no" \
+            root@{{ src_ip }}:{{ sysvol_path }}/ {{ sysvol_path }}/
+        '
+      register: _real_run
       changed_when: true
-      failed_when: false

@@ -13,3 +13,4 @@ ansible/playbooks/reports/*
 *.bak*
 ansible/playbooks/_test_*.yml
 ansible/playbooks/includes/
+zamba-lxc-toolbox/

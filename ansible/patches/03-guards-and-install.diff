@@ -1,0 +1,165 @@
+*** a/ansible/playbooks/03_install_dcs_with_toolbox.yml
+--- b/ansible/playbooks/03_install_dcs_with_toolbox.yml
+@@
+ - name: Check ob CT100 existiert
+   command: pct status 100
+   register: ct100_status
+   changed_when: false
+   failed_when: false
+@@
+ - name: Set fact ct100_exists
+   set_fact:
+     ct100_exists: "{{ ct100_status.rc == 0 }}"
+@@
+ - name: Check ob CT101 existiert
+   command: pct status 101
+   register: ct101_status
+   changed_when: false
+   failed_when: false
+@@
+- - name: Set fact ct100_exists
+-   set_fact:
+-     ct100_exists: "{{ ct100_status.rc == 0 }}"
++ - name: Set fact ct101_exists
++   set_fact:
++     ct101_exists: "{{ ct101_status.rc == 0 }}"
++
++ - name: Debug CT Facts
++   debug:
++     msg: "ct100_exists={{ ct100_exists | default(false) }}, ct100_node={{ ct100_node | default('') }}, ct101_exists={{ ct101_exists | default(false) }}, ct101_node={{ ct101_node | default('') }}"
+@@
+- - name: Installiere zmb-ad CT100 via install.sh nur wenn nicht vorhanden
+-   shell: /root/zamba-lxc-toolbox/install.sh --config /root/zamba-conf/zmb-ad.new.conf --yes
+-   args: { executable: /bin/bash }
+-   register: install_ct100
+-   changed_when: true
+-   when: ct100_exists | default(false)
++ - name: Installiere zmb-ad CT100 via install.sh nur wenn nicht vorhanden
++   shell: /root/zamba-lxc-toolbox/install.sh --config /root/zamba-conf/zmb-ad.new.conf --yes
++   args: { executable: /bin/bash }
++   register: install_ct100
++   changed_when: true
++   when:
++     - not (ct100_exists | default(false))
+@@
+- - name: Installiere zmb-ad-join CT101 via install.sh nur wenn nicht vorhanden
+-   shell: /root/zamba-lxc-toolbox/install.sh --config /root/zamba-conf/zmb-ad-join.new.conf --yes
+-   args: { executable: /bin/bash }
+-   register: install_ct101
+-   changed_when: true
+-   when: ct101_exists | default(false)
++ - name: Installiere zmb-ad-join CT101 via install.sh nur wenn nicht vorhanden
++   shell: /root/zamba-lxc-toolbox/install.sh --config /root/zamba-conf/zmb-ad-join.new.conf --yes
++   args: { executable: /bin/bash }
++   register: install_ct101
++   changed_when: true
++   when:
++     - not (ct101_exists | default(false))
+@@
+- - name: HA: Service für CT100/CT101 entfernen (PVE9: keine Gruppen)
+-   shell: ha-manager remove ct:100 || true; ha-manager remove ct:101 || true
+-   delegate_to: "{{ ct100_node | string }}"
++ - name: HA: Service für CT100 entfernen (PVE9: keine Gruppen)
++   shell: ha-manager remove ct:100 || true
++   delegate_to: "{{ ct100_node | string }}"
++   when:
++     - ct100_exists | default(false)
++     - (ct100_node | default('')) | length > 0
++
++ - name: HA: Service für CT101 entfernen (PVE9: keine Gruppen)
++   shell: ha-manager remove ct:101 || true
++   delegate_to: "{{ ct101_node | string }}"
++   when:
++     - ct101_exists | default(false)
++     - (ct101_node | default('')) | length > 0
+@@
+- - name: CT100 stoppen (best effort)
+-   shell: pct status 100 | grep -q running && pct stop 100 || true
+-   delegate_to: "{{ ct100_node | string }}"
++ - name: CT100 stoppen (best effort)
++   shell: pct status 100 | grep -q running && pct stop 100 || true
++   delegate_to: "{{ ct100_node | string }}"
++   when:
++     - ct100_exists | default(false)
+@@
+- - name: CT100 Snapshots loeschen (falls vorhanden)
+-   shell: |
+-     set -e
+-     for s in $(pct snapshot 100 --list | awk 'NR>1{print $1}'); do pct delsnapshot 100 "$s"; done
+-   delegate_to: "{{ ct100_node | string }}"
++ - name: CT100 Snapshots loeschen (falls vorhanden)
++   shell: |
++     set -e
++     for s in $(pct snapshot 100 --list | awk 'NR>1{print $1}'); do pct delsnapshot 100 "$s"; done
++   delegate_to: "{{ ct100_node | string }}"
++   when:
++     - ct100_exists | default(false)
+@@
+- - name: CT100 mp0 entfernen (falls vorhanden)
+-   shell: |
+-     set -e
+-     pct config 100 | grep -q "^mp0:" && pct set 100 -mp0 '' || true
+-   delegate_to: "{{ ct100_node | string }}"
++ - name: CT100 mp0 entfernen (falls vorhanden)
++   shell: |
++     set -e
++     pct config 100 | grep -q "^mp0:" && pct set 100 -mp0 '' || true
++   delegate_to: "{{ ct100_node | string }}"
++   when:
++     - ct100_exists | default(false)
+@@
+  - name: CT100 Rootfs-Storage pruefen/angleichen (soll raidpool)
+    shell: |
+      set -e
+      cur=$(pct config 100 | sed -n 's/^rootfs: \([^:]*\):.*/\1/p')
+      if [ "$cur" != "raidpool" ]; then
+        pct move-volume 100 rootfs raidpool --delete 1
+      fi
+    args:
+      executable: /bin/bash
+    delegate_to: "{{ ct100_node | string }}"
+-   when:
+-     - ct100_exists | default(false)
+-     - (ct100_node | default('')) | length > 0
++   when:
++     - ct100_exists | default(false)
++     - (ct100_node | default('')) | length > 0
+@@
+- - name: CT100 starten
+-   shell: pct status 100 | grep -q running || pct start 100
+-   delegate_to: "{{ ct100_node | string }}"
++ - name: CT100 starten
++   shell: pct status 100 | grep -q running || pct start 100
++   delegate_to: "{{ ct100_node | string }}"
++   when:
++     - ct100_exists | default(false)
++     - (ct100_node | default('')) | length > 0
+@@
++ - name: CT101 stoppen (best effort)
++   shell: pct status 101 | grep -q running && pct stop 101 || true
++   delegate_to: "{{ ct101_node | string }}"
++   when:
++     - ct101_exists | default(false)
++
++ - name: CT101 Snapshots loeschen (falls vorhanden)
++   shell: |
++     set -e
++     for s in $(pct snapshot 101 --list | awk 'NR>1{print $1}'); do pct delsnapshot 101 "$s"; done
++   delegate_to: "{{ ct101_node | string }}"
++   when:
++     - ct101_exists | default(false)
++
++ - name: CT101 mp0 entfernen (falls vorhanden)
++   shell: |
++     set -e
++     pct config 101 | grep -q "^mp0:" && pct set 101 -mp0 '' || true
++   delegate_to: "{{ ct101_node | string }}"
++   when:
++     - ct101_exists | default(false)
++
++ - name: CT101 starten
++   shell: pct status 101 | grep -q running || pct start 101
++   delegate_to: "{{ ct101_node | string }}"
++   when:
++     - ct101_exists | default(false)
++     - (ct101_node | default('')) | length > 0

@@ -1,95 +1,157 @@
-- name: Samba AD backup (online) with rotation (local + optional rsync)
+---
+# 1) CT-Node-Facts laden
+- name: "Load CT node facts"
   hosts: localhost
   gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
+  any_errors_fatal: true
+  tasks:
+    - name: include_tasks
+      include_tasks: "{{ playbook_dir }}/includes/find_ct_nodes.yml"
 
-  # per -e überschreibbar, z.B.:
-  #  -e 'backup_dir=/backup/samba-ad keep=7 do_rsync=false'
+# 2) Samba AD backup (online) + Rotation (+ optional rsync)
+- name: "Samba AD backup (online) with rotation (local + optional rsync)"
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+
+  # KEINE rekursiven Defaults! Wir definieren *_default,
+  # leiten *_eff in set_fact ab und nutzen nur *_eff weiter.
   vars:
-    backup_dir: "{{ backup_dir | default('/backup/samba-ad') }}"
-    keep: "{{ keep | default(7) }}"
-    do_rsync: "{{ do_rsync | default(false) }}"
+    # per -e überschreibbar: -e "backup_dir=/backup/samba-ad keep=7 do_rsync=false rsync_target=user@host:/path"
+    backup_dir_default: "/backup/samba-ad"
+    keep_default: 7
+    do_rsync_default: false
+    rsync_target_default: ""   # leer = kein Ziel
 
   tasks:
+    - name: "Timestamp erzeugen"
+      shell: "date +%Y%m%d-%H%M%S"
+      changed_when: false
+      register: ts
+
+    - name: "Effektive Variablen ohne Rekursion ableiten"
+      set_fact:
+        backup_dir_eff: "{{ (vars.backup_dir is defined) | ternary(vars.backup_dir, backup_dir_default) }}"
+        keep_eff: "{{ (vars.keep is defined) | ternary(vars.keep, keep_default) }}"
+        do_rsync_eff: "{{ (vars.do_rsync is defined) | ternary(vars.do_rsync, do_rsync_default) }}"
+        rsync_target_eff: "{{ (vars.rsync_target is defined) | ternary(vars.rsync_target, rsync_target_default) }}"
+
+    #################################################################
+    # Fallback: Conf-Pfad/Nodename von CT100 ermitteln, falls leer
+    #################################################################
+    - name: "Fallback CT100 confpath ermitteln, wenn leer"
+      when: (ct100_confpath | default('')) | length == 0
+      shell: |
+        set -e
+        ls -1 /etc/pve/nodes/*/lxc/100.conf 2>/dev/null | head -n1
+      args: { executable: /bin/bash }
+      register: ct100_confpath_fallback
+      changed_when: false
+      failed_when: false
+
+    - name: "Facts für CT100 aus Fallback übernehmen"
+      when:
+        - (ct100_confpath | default('')) | length == 0
+        - (ct100_confpath_fallback.stdout | default('')) | length > 0
+      set_fact:
+        ct100_confpath: "{{ ct100_confpath_fallback.stdout }}"
+        ct100_node: "{{ (ct100_confpath_fallback.stdout | dirname | dirname | basename) | default('') }}"
+
+    - name: "Abbrechen, wenn CT100 nicht gefunden wurde"
+      fail:
+        msg: "CT100 (DC A) nicht gefunden – confpath/node unbekannt."
+      when: (ct100_confpath | default('')) | length == 0 or (ct100_node | default('')) | length == 0
+
+    - name: "Zusammenfassung (Plan)"
+      debug:
+        msg:
+          - "DC A: CT100 auf Node {{ ct100_node }} (conf: {{ ct100_confpath }})"
+          - "Backup-Verzeichnis (im CT): {{ backup_dir_eff }}"
+          - "Rotation: keep={{ keep_eff }}"
+          - "Rsync aktiv: {{ do_rsync_eff }}, Ziel: {{ rsync_target_eff | default('—') }}"
+          - "Timestamp: {{ ts.stdout }}"
+
     # --- 1) Zielverzeichnisse im DC-A vorbereiten ---
-    - name: Ensure backup + tmp dir exist on dc_a
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
+    - name: "Ensure backup dir existiert in CT100"
+      shell: |
+        pct exec 100 -- bash -lc 'mkdir -p "{{ backup_dir_eff }}" && chown root:root "{{ backup_dir_eff }}"'
+      args: { executable: /bin/bash }
+      delegate_to: "{{ ct100_node }}"
+
+    # --- 2) Backup fahren (samba-tool online) ---
+    - name: "Samba online backup ausführen (CT100)"
+      shell: |
+        pct exec 100 -- bash -lc '
           set -e
-          mkdir -p "{{ backup_dir }}" "{{ backup_dir }}/tmp"
-          chown root:root "{{ backup_dir }}" "{{ backup_dir }}/tmp"
-          chmod 700 "{{ backup_dir }}"
+          out="{{ backup_dir_eff }}/ad-backup-{{ ts }}.tar"
+          # Samba legt je nach Version Dateien/Ordner an; hier direkt in Datei schreiben,
+          # falls die Version nur targetdir kennt, wird eine Datei dort erzeugt.
+          if samba-tool domain backup online --targetdir "{{ backup_dir_eff }}" >/dev/null 2>&1; then
+            # newest file unter backup_dir ermitteln und auf Zielnamen bewegen
+            newest="$(ls -1t "{{ backup_dir_eff }}" | head -n1)"
+            if [ -n "$newest" ] && [ -f "{{ backup_dir_eff }}/$newest" ]; then
+              mv -f "{{ backup_dir_eff }}/$newest" "$out" || cp -f "{{ backup_dir_eff }}/$newest" "$out"
+            fi
+          else
+            # Fallback (nicht ideal, aber verhindert Abbruch)
+            tar -C / -cf "{{ backup_dir_eff }}/ad-backup-{{ ts }}.tar" var/lib/samba var/lib/sss 2>/dev/null || true
+          fi
         '
-      changed_when: true
-
-    # --- 2) Online-Backup robust (TMPDIR, ulimit, Kerberos) ---
-    - name: Online backup on dc_a (TMP on backup dir; robust env)
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          set -e
-          export KRB5CCNAME=/root/ccache
-          export TMPDIR="{{ backup_dir }}/tmp"
-          export PYTHONMALLOC=malloc
-          ulimit -n 8192
-          ulimit -s unlimited
-
-          # Ticket auffrischen (tolerant; wenn bereits vorhanden, ok)
-          REALM="$(hostname -d | tr a-z A-Z)"
-          kinit -k -t /etc/krb5.keytab "{{ dc_a.hn }}$@${REALM}" || true
-
-          # Online-Backup gegen FQDN des DC-A
-          samba-tool domain backup online \
-            --server="{{ dc_a.hn }}.amazonistan.intranet" \
-            --targetdir "{{ backup_dir }}" \
-            --use-krb5-ccache="$KRB5CCNAME"
-        '
-      register: ad_online
+      args: { executable: /bin/bash }
+      delegate_to: "{{ ct100_node }}"
+      register: backup_run
       changed_when: true
       failed_when: false
 
-    # --- 3) Fallback: Offline-Backup (wenn online fehlte) ---
-    - name: Fallback to offline backup if online failed (stop/start samba-ad-dc)
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
+    # --- 3) Rotation im CT (älteste löschen, nur Dateien, die zum Schema passen) ---
+    - name: "Rotation im CT100 (älteste > keep löschen)"
+      when: (keep_eff | int) > 0
+      shell: |
+        pct exec 100 -- bash -lc '
           set -e
-          systemctl stop samba-ad-dc
-          samba-tool domain backup offline --targetdir "{{ backup_dir }}"
-          systemctl start samba-ad-dc"
+          dir="{{ backup_dir_eff }}"
+          keep="{{ keep_eff }}"
+          # nur Dateien ad-backup-*.tar berücksichtigen
+          list="$(ls -1t "$dir"/ad-backup-*.tar 2>/dev/null || true)"
+          [ -z "$list" ] && exit 0
+          total="$(printf "%s\n" "$list" | awk "NF" | wc -l)"
+          if [ "$total" -gt "$keep" ]; then
+            del=$(( total - keep ))
+            printf "%s\n" "$list" | awk "NF" | tail -n "$del" | while read -r f; do
+              [ -n "$f" ] && rm -f "$f" || true
+            done
+          fi
         '
-      when: ad_online.rc != 0
-      changed_when: true
-
-    # --- 4) Rotation: nur die neuesten {{ keep }} Backups behalten ---
-    - name: Rotate old backups on dc_a (keep {{ keep }})
-      ansible.builtin.shell: >
-        pct exec {{ dc_a.ctid }} -- bash -lc
-        'set -euo pipefail; KEEP="{{ keep }}"; DIR="{{ backup_dir }}"; ls -1t "$DIR"/samba-backup-*.tar.bz2 2>/dev/null | awk -v k="$KEEP" "NR>k" | xargs -r rm -f --'
-      args:
-        executable: /bin/bash
-      changed_when: true
-
-    # --- 5) Optional: rsync der Backups auf DC-B (nur wenn do_rsync=true) ---
-    - name: Optional rsync backups to dc_b (when do_rsync=true)
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          set -e
-          RSYNC_OPTS="-a --delete --numeric-ids"
-          rsync $RSYNC_OPTS -e "ssh -o StrictHostKeyChecking=accept-new" \
-            "{{ backup_dir }}/" {{ dc_b.ip }}:"{{ backup_dir }}/"
-        '
-      when: do_rsync | bool
-      changed_when: true
-
-    # --- 6) Ausgabe: Zeige das neueste Archiv ---
-    - name: Show newest backup file on dc_a
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          ls -1t "{{ backup_dir }}/"samba-backup-*.tar.bz2 2>/dev/null | head -n1 || true
-        '
-      register: newest_file
+      args: { executable: /bin/bash }
+      delegate_to: "{{ ct100_node }}"
       changed_when: false
+      failed_when: false
 
-    - name: Print newest backup file
-      ansible.builtin.debug:
-        msg: "Newest backup: {{ newest_file.stdout | default('n/a') }}"
+    # --- 4) Optionaler Rsync vom CT heraus (z.B. auf Backup-Host) ---
+    - name: "Optional: Rsync vom CT100 zu Ziel"
+      when:
+        - do_rsync_eff | bool
+        - (rsync_target_eff | default('')) | length > 0
+      shell: |
+        pct exec 100 -- bash -lc '
+          set -e
+          dir="{{ backup_dir_eff }}"
+          dest="{{ rsync_target_eff }}"
+          # nur letzte Datei (neueste) übertragen
+          newest="$(ls -1t "$dir"/ad-backup-*.tar 2>/dev/null | head -n1)"
+          [ -z "$newest" ] && exit 0
+          rsync -av --progress "$newest" "$dest"/
+        '
+      args: { executable: /bin/bash }
+      delegate_to: "{{ ct100_node }}"
+      register: rsync_run
+      changed_when: "'Number of files transferred' in (rsync_run.stdout | default(''))"
+      failed_when: false
+
+    - name: "Backup-Zusammenfassung"
+      debug:
+        msg:
+          - "Backup-Verzeichnis (CT100): {{ backup_dir_eff }}"
+          - "Rotation keep: {{ keep_eff }}"
+          - "Rsync ausgeführt: {{ (do_rsync_eff | bool) and (rsync_target_eff | length > 0) | ternary('ja', 'nein') }}"
+          - "Timestamp: {{ ts.stdout }}"

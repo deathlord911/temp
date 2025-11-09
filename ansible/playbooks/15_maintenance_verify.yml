@@ -1,269 +1,324 @@
+---
 - name: Maintenance / Verification (Ceph, APT, Timers, AD, Backups)
   hosts: localhost
   gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
+
   vars:
-    # Fallbacks, falls group_vars fehlen
-    dc_a: { ctid: 100, hn: "zmb-ad",      ip: "192.168.100.241" }
-    dc_b: { ctid: 101, hn: "zmb-ad-join", ip: "192.168.100.242" }
-    # Pfad ist *im CT* (zmb-ad)
-    backup_dir: "/backup/samba-ad"
-    backup_max_age_days: 7
-    reports_dir: "../playbooks/reports"
-    gate_fail: true   # bei Findings am Ende mit Fehler abbrechen
-    issues: []
+    report_dir: "{{ playbook_dir }}/reports"
+    drs_cts: [100, 101]            # unsere beiden DC-Container
+    ad_backup_ct: 100              # CT für AD-Backups
+    ad_backup_dir_ct: "/backup/samba-ad"
+    ad_backup_max_age_days: 7
+    apt_lock_files:
+      - /var/lib/dpkg/lock
+      - /var/lib/dpkg/lock-frontend
+      - /var/cache/apt/archives/lock
+      - /var/lib/apt/lists/lock
 
   tasks:
+    #####################################################################
+    # Report-Verzeichnis + Timestamp
+    #####################################################################
     - name: Ensure reports directory exists
       ansible.builtin.file:
-        path: "{{ reports_dir }}"
+        path: "{{ report_dir }}"
         state: directory
         mode: "0755"
 
     - name: Timestamp for report
-      ansible.builtin.command: date +%Y%m%d-%H%M%S
-      register: ts
-      changed_when: false
+      ansible.builtin.set_fact:
+        _ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+        report_path: "{{ report_dir }}/maintenance-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}.md"
+
+    - name: Init maintenance counters and notes
+      ansible.builtin.set_fact:
+        maintenance_issues: 0
+        maintenance_notes: []
 
     #####################################################################
-    # Ceph Health
+    # Ceph Health (optional, wenn ceph vorhanden)
     #####################################################################
-    - name: Get Ceph health (JSON)
+    - name: Get Ceph health (JSON) if ceph is present
       ansible.builtin.shell: |
-        ceph status --format json 2>/dev/null \
-        | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["health"]["status"]); print(d.get("fsid","-"));'
-      register: ceph_health
+        set -euo pipefail
+        if command -v ceph >/dev/null 2>&1; then
+          ceph status --format json || true
+        else
+          echo ''
+        fi
+      args:
+        executable: /bin/bash
+      register: _ceph_health_raw
       changed_when: false
       failed_when: false
 
+    - name: Normalize ceph stdout to string
+      ansible.builtin.set_fact:
+        _ceph_stdout: "{{ (_ceph_health_raw.stdout | default('')) | string }}"
+
+    - name: Parse Ceph health JSON
+      ansible.builtin.set_fact:
+        _ceph_health: "{{ (_ceph_stdout | length > 2) | ternary((_ceph_stdout | from_json), {}) }}"
+        _ceph_status: "{{ (_ceph_stdout | length > 2) | ternary(((_ceph_stdout | from_json).health.status | default('N/A')), 'N/A') }}"
+
     - name: Record Ceph health finding (if not HEALTH_OK)
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'Ceph health is ' ~ (ceph_health.stdout_lines|first|default('UNKNOWN')) ] }}"
-      when: (ceph_health.rc != 0) or ((ceph_health.stdout_lines|first|default('UNKNOWN')) != 'HEALTH_OK')
+        maintenance_issues: "{{ (maintenance_issues | int) + (( _ceph_status != 'HEALTH_OK') | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'Ceph not HEALTH_OK: ' ~ _ceph_status ] if (_ceph_status != 'HEALTH_OK') else [] ) }}
 
     #####################################################################
-    # Timers / Services
+    # Systemd Timer/Services Guards
     #####################################################################
     - name: Check ceph-safe-update.timer enabled
-      ansible.builtin.shell: systemctl is-enabled ceph-safe-update.timer
-      register: timer_enabled
+      ansible.builtin.shell: "systemctl is-enabled ceph-safe-update.timer || true"
+      register: _ceph_timer_enabled
       changed_when: false
       failed_when: false
 
     - name: Flag if ceph-safe-update.timer not enabled
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'ceph-safe-update.timer is not enabled' ] }}"
-      when: timer_enabled.stdout.strip() not in ['enabled']
+        maintenance_issues: "{{ (maintenance_issues | int) + ((_ceph_timer_enabled.stdout | trim != 'enabled') | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'ceph-safe-update.timer is not enabled (' ~ (_ceph_timer_enabled.stdout | trim) ~ ')' ]
+                 if (_ceph_timer_enabled.stdout | trim != 'enabled') else [] ) }}
 
-    - name: Check pve-auto-upgrades.timer (enabled?)
-      ansible.builtin.shell: |
-        systemctl is-enabled pve-auto-upgrades.timer 2>/dev/null || true
-      register: pve_auto_enabled
+    - name: Check pve-auto-upgrades.timer enabled
+      ansible.builtin.shell: "systemctl is-enabled pve-auto-upgrades.timer || true"
+      register: _pve_timer_enabled
       changed_when: false
+      failed_when: false
 
-    - name: Check pve-auto-upgrades.timer (active?)
-      ansible.builtin.shell: |
-        systemctl is-active pve-auto-upgrades.timer 2>/dev/null || true
-      register: pve_auto_active
+    - name: Check pve-auto-upgrades.timer active
+      ansible.builtin.shell: "systemctl is-active pve-auto-upgrades.timer || true"
+      register: _pve_timer_active
       changed_when: false
+      failed_when: false
 
     - name: Flag if pve-auto-upgrades.timer enabled or active
       ansible.builtin.set_fact:
-        maint_issues: "{{ maint_issues + ['pve-auto-upgrades.timer is enabled/active (should be disabled)'] }}"
-      when: >
-        (pve_auto_enabled.stdout | trim == 'enabled') or
-        (pve_auto_active.stdout  | trim == 'active')
-
-    - name: Debug pve-auto-upgrades timer status
-      ansible.builtin.debug:
-        msg:
-          enabled: "{{ pve_auto_enabled.stdout | trim }}"
-          active:  "{{ pve_auto_active.stdout  | trim }}"
-      when: updates.debug | default(false)
+        maintenance_issues: "{{ (maintenance_issues | int)
+                                + ((_pve_timer_enabled.stdout | trim == 'enabled') | int)
+                                + ((_pve_timer_active.stdout | trim == 'active') | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'pve-auto-upgrades.timer should be disabled (is ' ~ (_pve_timer_enabled.stdout | trim) ~ ')' ]
+                 if (_pve_timer_enabled.stdout | trim == 'enabled') else [] )
+             + ( [ 'pve-auto-upgrades.timer should be inactive (is ' ~ (_pve_timer_active.stdout | trim) ~ ')' ]
+                 if (_pve_timer_active.stdout | trim == 'active') else [] ) }}
 
     - name: Check unattended-upgrades.service masked
-      ansible.builtin.shell: systemctl is-enabled unattended-upgrades.service || true
-      register: unattended_state
+      ansible.builtin.shell: "systemctl is-enabled unattended-upgrades.service || true"
+      register: _uunatt_enabled
       changed_when: false
       failed_when: false
 
     - name: Flag if unattended-upgrades not masked
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'unattended-upgrades.service is not masked' ] }}"
-      when: unattended_state.stdout.strip() not in ['masked','disabled','not-found','static','']
+        maintenance_issues: "{{ (maintenance_issues | int) + ((_uunatt_enabled.stdout | trim != 'masked') | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'unattended-upgrades.service should be masked (is ' ~ (_uunatt_enabled.stdout | trim) ~ ')' ]
+                 if (_uunatt_enabled.stdout | trim != 'masked') else [] ) }}
 
     #####################################################################
-    # APT / DPKG idle
+    # APT Busy / Locks
     #####################################################################
     - name: Detect APT/DPKG busy processes
       ansible.builtin.shell: |
-        pgrep -fa '(^|/)(apt|dpkg|unattended|packagekit|needrestart|debconf)' || true
-      register: apt_busy
+        set -euo pipefail
+        ps -eo comm= | egrep -E '^(apt|apt-get|aptitude|dpkg|unattended-upgrade|aptd)$' | wc -l
+      args:
+        executable: /bin/bash
+      register: _apt_busy_count
       changed_when: false
+      failed_when: false
+
+    - name: Compute APT busy bool
+      ansible.builtin.set_fact:
+        _apt_busy: "{{ (_apt_busy_count.stdout | default('0') | int) > 0 }}"
 
     - name: Flag if APT/DPKG busy
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'APT/DPKG busy: ' ~ (apt_busy.stdout | trim) ] }}"
-      when: apt_busy.stdout | trim != ""
+        maintenance_issues: "{{ (maintenance_issues | int) + (_apt_busy | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes + ( ['APT/DPKG still busy'] if _apt_busy else [] ) }}
 
-    - name: Detect common lock files
-      ansible.builtin.shell: |
-        found=0
-        for l in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock /var/lib/apt/lists/lock; do
-          if [ -e "$l" ]; then
-            echo "$l"
-            found=1
-          fi
-        done
-        # immer mit RC 0 raus, damit Ansible nicht scheitert
-        exit 0
-      args:
-        executable: /bin/bash
-      register: apt_locks
-      changed_when: false
-      failed_when: false
+    - name: Detect common APT lock files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ apt_lock_files }}"
+      register: _apt_locks
+
+    - name: Build list of present APT lock files
+      ansible.builtin.set_fact:
+        _apt_locks_present: >-
+          {{ _apt_locks.results
+             | selectattr('stat.exists','defined')
+             | selectattr('stat.exists')
+             | map(attribute='stat.path', default='{{ item }}')
+             | list }}
 
     - name: Flag if APT locks present
       ansible.builtin.set_fact:
-        issues: "{{ issues + ['APT lock files present: ' + (apt_locks.stdout_lines | join(', '))] }}"
-      when: apt_locks.stdout | trim != ''
+        maintenance_issues: "{{ (maintenance_issues | int) + (( _apt_locks_present | length > 0 ) | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'APT locks present: ' ~ (_apt_locks_present | join(', ')) ]
+                 if (_apt_locks_present | length > 0) else [] ) }}
 
     #####################################################################
-    # AD Checks (beide DCs)
+    # DRS showrepl (Fehlerindikatoren)
     #####################################################################
     - name: DRS showrepl on each DC
       ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc 'samba-tool drs showrepl'
-      register: drs
+        set -euo pipefail
+        pct exec {{ item }} -- bash -lc 'samba-tool drs showrepl 2>&1 || true'
+      args:
+        executable: /bin/bash
+      loop: "{{ drs_cts }}"
+      register: _drs_out
       changed_when: false
       failed_when: false
-      loop: ["{{ dc_a }}","{{ dc_b }}"]
-      loop_control:
-        label: "{{ item.ctid }}"
 
     - name: Flag if DRS output indicates errors
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'DRS issues on CT ' ~ item.item.ctid|string ] }}"
-      loop: "{{ drs.results }}"
-      when: item.rc != 0
-      loop_control:
-        label: "{{ item.item.ctid }}"
+        maintenance_issues: >-
+          {{ (maintenance_issues | int)
+             + ( (_drs_out.results | selectattr('stdout','search','ERROR') | list | length) | int ) }}
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( _drs_out.results
+                 | selectattr('stdout','search','ERROR')
+                 | map(attribute='item')
+                 | map('regex_replace','^(.*)$','DRS showrepl has ERROR in CT \\1')
+                 | list ) }}
 
-    - name: Check NETLOGON present (smbclient) on each DC
+    #####################################################################
+    # NETLOGON / SYSVOL Check (ohne Anonymous-Listing)
+    #####################################################################
+    - name: Check NETLOGON/SYSVOL presence via testparm in each DC
       ansible.builtin.shell: |
-        pct exec {{ item.ctid }} -- bash -lc "smbclient -L localhost -N | grep -iq netlogon"
-      register: netlogon
-      changed_when: false
-      failed_when: false
-      loop: ["{{ dc_a }}","{{ dc_b }}"]
-      loop_control:
-        label: "{{ item.ctid }}"
-
-    - name: Flag if NETLOGON missing
-      ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'NETLOGON not listed via smbclient on CT ' ~ item.item.ctid|string ] }}"
-      loop: "{{ netlogon.results }}"
-      when: item.rc != 0
-      loop_control:
-        label: "{{ item.item.ctid }}"
-
-    #####################################################################
-    # Generate fresh AD Health report (Playbook 07)
-    #####################################################################
-    - name: Run AD Health Report playbook (07)
-      ansible.builtin.command: >
-        ansible-playbook {{ playbook_dir }}/07_ad_health_report.yml
-      register: health_report_run
-      changed_when: false
-      failed_when: false
-
-    - name: Get latest AD report filename
-      ansible.builtin.shell: |
-        ls -1t {{ playbook_dir }}/reports/ad-health-*.md 2>/dev/null | head -n1
-      register: last_ad_report
-      changed_when: false
-      failed_when: false
-
-    - name: Flag if no AD health report found
-      ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'No AD health report found in reports/' ] }}"
-      when: last_ad_report.stdout | trim == ""
-
-    #####################################################################
-    # AD Backup freshness (IM CT 100 prüfen!)
-    #####################################################################
-    - name: Find recent AD backups inside dc_a container
-      ansible.builtin.shell: |
-        pct exec {{ dc_a.ctid }} -- bash -lc '
-          find {{ backup_dir }} -maxdepth 1 -type f -name "samba-backup-*.tar.bz2" \
-            -mtime -{{ backup_max_age_days + 1 }} -printf "%T@ %p\n" 2>/dev/null \
-          | sort -nr | head -n1 | awk "{print \$2}"
+        set -euo pipefail
+        pct exec {{ item }} -- bash -lc '
+          testparm -s 2>/dev/null | awk "
+            BEGIN{net=0;sys=0}
+            /^\[netlogon\]/{net=1}
+            /^\[sysvol\]/{sys=1}
+            END{
+              printf(\"netlogon=%s sysvol=%s\n\", net?\"present\":\"missing\", sys?\"present\":\"missing\")
+            }"
         '
-      register: recent_backup_ct
+      args:
+        executable: /bin/bash
+      register: _netlogon_sysvol
+      loop: "{{ drs_cts }}"
       changed_when: false
       failed_when: false
 
-    - name: Flag if no fresh AD backup found (in CT)
+    - name: Flag if NETLOGON/SYSVOL missing
       ansible.builtin.set_fact:
-        issues: "{{ issues + [ 'No recent AD backup < ' ~ backup_max_age_days|string ~ ' days in ' ~ backup_dir ~ ' (inside CT ' ~ dc_a.ctid|string ~ ')' ] }}"
-      when: recent_backup_ct.stdout | trim == ""
+        maintenance_issues: >-
+          {{ (maintenance_issues | int)
+             + ( (_netlogon_sysvol.results
+                  | selectattr('stdout','search','netlogon=missing')
+                  | list | length) | int )
+             + ( (_netlogon_sysvol.results
+                  | selectattr('stdout','search','sysvol=missing')
+                  | list | length) | int ) }}
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + (_netlogon_sysvol.results
+                | selectattr('stdout','search','netlogon=missing')
+                | map(attribute='item')
+                | map('regex_replace','^(.*)$','NETLOGON missing in CT \\1')
+                | list)
+             + (_netlogon_sysvol.results
+                | selectattr('stdout','search','sysvol=missing')
+                | map(attribute='item')
+                | map('regex_replace','^(.*)$','SYSVOL missing in CT \\1')
+                | list)
+          }}
 
     #####################################################################
-    # Build maintenance report markdown
+    # AD Backup (im CT100 suchen)
+    #####################################################################
+    - name: Find latest AD backup file inside CT100
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pct exec {{ ad_backup_ct }} -- bash -lc '
+          shopt -s nullglob
+          latest=$(ls -1t {{ ad_backup_dir_ct }}/*.{tar.bz2,tar.gz} 2>/dev/null | head -n1 || true)
+          echo "$latest"
+        '
+      args:
+        executable: /bin/bash
+      register: _ad_backup_latest
+      changed_when: false
+      failed_when: false
+
+    - name: Compute backup age in days (inside CT100)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        f="{{ _ad_backup_latest.stdout | trim }}"
+        if [ -z "$f" ]; then
+          echo 99999
+          exit 0
+        fi
+        pct exec {{ ad_backup_ct }} -- bash -lc "test -e \"$f\" && echo \$(( ( \$(date +%s) - \$(stat -c %Y \"$f\") ) / 86400 )) || echo 99999"
+      args:
+        executable: /bin/bash
+      register: _ad_backup_age_days
+      changed_when: false
+      failed_when: false
+
+    - name: Flag if no fresh AD backup found (<= 7d)
+      ansible.builtin.set_fact:
+        maintenance_issues: "{{ (maintenance_issues | int) + (((_ad_backup_age_days.stdout | trim | int) > ad_backup_max_age_days) | int) }}"
+        maintenance_notes: >-
+          {{ maintenance_notes
+             + ( [ 'No fresh AD backup (<= ' ~ ad_backup_max_age_days ~ 'd) in CT ' ~ ad_backup_ct
+                   ~ '; latest: ' ~ (_ad_backup_latest.stdout | trim) ]
+                 if ( (_ad_backup_age_days.stdout | trim | int) > ad_backup_max_age_days ) else [] ) }}
+
+    #####################################################################
+    # Report schreiben
     #####################################################################
     - name: Build report content
       ansible.builtin.set_fact:
-        report_md: |
-          # Maintenance Report ({{ ts.stdout }})
+        _report_md: |-
+          # Maintenance Report ({{ _ts }})
 
-          ## Summary
-          - Host: {{ lookup('ansible.builtin.pipe', 'hostname -f') | trim }}
-          - Ceph health: {{ (ceph_health.stdout_lines|first|default('UNKNOWN')) }}
-          - ceph fsid: {{ (ceph_health.stdout_lines|length > 1) | ternary(ceph_health.stdout_lines[1], '-') }}
-          - ceph-safe-update.timer enabled: {{ timer_enabled.stdout | trim }}
-          - unattended-upgrades.service: {{ unattended_state.stdout | trim }}
-          - Recent AD backup (CT {{ dc_a.ctid }}): {{ (recent_backup_ct.stdout | trim) if (recent_backup_ct.stdout | trim) else 'none' }}
-          - Latest AD health file: {{ (last_ad_report.stdout | trim) if (last_ad_report.stdout | trim) else 'none' }}
+          **Issues found:** {{ maintenance_issues }}
+          - ceph-safe-update.timer enabled: {{ _ceph_timer_enabled.stdout | default('') | trim }}
+          - pve-auto-upgrades.timer enabled: {{ _pve_timer_enabled.stdout | default('') | trim }}
+          - pve-auto-upgrades.timer active:  {{ _pve_timer_active.stdout | default('') | trim }}
+          - unattended-upgrades.service is-enabled: {{ _uunatt_enabled.stdout | default('') | trim }}
+          - APT busy: {{ _apt_busy | default(false) }}
+          - APT locks: {{ (_apt_locks_present | length > 0) | ternary((_apt_locks_present | join(', ')),'none') }}
+          - Ceph status: {{ _ceph_status }}
 
-          ## Issues ({{ issues | length }})
-          {% if issues | length == 0 %}
-          - none 🎉
-          {% else %}
-          {% for i in issues %}- {{ i }}
-          {% endfor %}
-          {% endif %}
-
-          ## Details
-          <details><summary>DRS (CT {{ dc_a.ctid }})</summary>
-
-          ```text
-          {{ (drs.results[0].stdout | default(''))[:4000] }}
-          ```
-          </details>
-
-          <details><summary>DRS (CT {{ dc_b.ctid }})</summary>
-
-          ```text
-          {{ (drs.results[1].stdout | default(''))[:4000] }}
-          ```
-          </details>
+          ## Notes
+          {% if maintenance_notes | length == 0 -%}
+          (none)
+          {%- else -%}
+          {% for n in maintenance_notes -%}
+          - {{ n }}
+          {% endfor -%}
+          {%- endif %}
 
     - name: Write report file
       ansible.builtin.copy:
-        dest: "{{ reports_dir }}/maintenance-{{ ts.stdout }}.md"
-        content: "{{ report_md }}"
+        dest: "{{ report_path }}"
+        content: "{{ _report_md }}"
         mode: "0644"
 
     #####################################################################
-    # Gate / Fail if there are issues
+    # Gate / Fail wenn Issues > 0
     #####################################################################
     - name: Fail because issues were found
       ansible.builtin.fail:
-        msg: "Maintenance Gate failed: {{ issues | length }} issues. See {{ reports_dir }}/maintenance-{{ ts.stdout }}.md"
-      when: gate_fail and (issues | length > 0)
-
-    - name: Success summary
-      ansible.builtin.debug:
-        msg: "Maintenance OK. Report saved to {{ reports_dir }}/maintenance-{{ ts.stdout }}.md"
-      when: issues | length == 0
+        msg: "Maintenance Gate failed: {{ maintenance_issues }} issues. See {{ report_path }}"
+      when: maintenance_issues | int > 0

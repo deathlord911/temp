@@ -1,14 +1,172 @@
+# ansible/playbooks/01_destroy_old_dcs.yml
 ---
-- name: (Optional) Alte DC-Container entfernen
+- name: (Optional) Alte DC-Container entfernen (clusterweit, node-aware)
   hosts: pve3
   gather_facts: false
+
+  vars:
+    # Feste Defaults (per -e überschreibbar)
+    ct100_id: 100
+    ct101_id: 101
+
   tasks:
-    - name: Stoppe und lösche alte DC-Container
+    #####################################################################
+    # Conf-Pfade clusterweit finden
+    #####################################################################
+    - name: "Finde CT{{ ct100_id }} Configpfad clusterweit"
       ansible.builtin.shell: |
-        for id in {{ old_dc_ctids | join(' ') }}; do
-          pct shutdown $id --forceStop 1 --timeout 30 || true
-          pct stop $id --skiplock 1 || true
-          pct destroy $id --purge 1 || true
-        done
+        set -e
+        find /etc/pve/nodes -path "*/lxc/{{ ct100_id }}.conf" -print -quit
       args:
         executable: /bin/bash
+      register: _conf100
+      changed_when: false
+
+    - name: "Finde CT{{ ct101_id }} Configpfad clusterweit"
+      ansible.builtin.shell: |
+        set -e
+        find /etc/pve/nodes -path "*/lxc/{{ ct101_id }}.conf" -print -quit
+      args:
+        executable: /bin/bash
+      register: _conf101
+      changed_when: false
+
+    #####################################################################
+    # Basis-Facts (1. Schritt)
+    #####################################################################
+    - name: "Setze Basis-Facts (Pfad + Existenz + Node extrahieren)"
+      ansible.builtin.set_fact:
+        ct100_conf: "{{ _conf100.stdout | trim }}"
+        ct101_conf: "{{ _conf101.stdout | trim }}"
+        ct100_exists: "{{ (_conf100.stdout | trim) | length > 0 }}"
+        ct101_exists: "{{ (_conf101.stdout | trim) | length > 0 }}"
+        ct100_node: >-
+          {{ ((_conf100.stdout | trim) | length > 0)
+             | ternary((_conf100.stdout | trim).split('/')[-3], '') }}
+        ct101_node: >-
+          {{ ((_conf101.stdout | trim) | length > 0)
+             | ternary((_conf101.stdout | trim).split('/')[-3], '') }}
+
+    #####################################################################
+    # Abgeleitete „sichere“ Delegation (2. Schritt)
+    #####################################################################
+    - name: "Setze sichere Delegations-Ziele"
+      ansible.builtin.set_fact:
+        safe_ct100_node: "{{ (ct100_node | length > 0) | ternary(ct100_node, inventory_hostname) }}"
+        safe_ct101_node: "{{ (ct101_node | length > 0) | ternary(ct101_node, inventory_hostname) }}"
+
+    - name: "Debug: was wird gelöscht?"
+      ansible.builtin.debug:
+        msg:
+          - "CT100: exists={{ ct100_exists }}, node='{{ ct100_node }}', conf='{{ ct100_conf }}'"
+          - "CT101: exists={{ ct101_exists }}, node='{{ ct101_node }}', conf='{{ ct101_conf }}'"
+
+    #####################################################################
+    # Löschablauf CT100 (nur wenn vorhanden)
+    #####################################################################
+    - name: "HA-Service CT{{ ct100_id }} entfernen (falls vorhanden)"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        ha-manager config 2>/dev/null | grep -q "ct:{{ ct100_id }}" && ha-manager remove ct:{{ ct100_id }} || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "CT{{ ct100_id }} stoppen (falls läuft)"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        pct status {{ ct100_id }} | grep -q running && pct stop {{ ct100_id }} || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "Alle Snapshots CT{{ ct100_id }} löschen"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        set -e
+        mapfile -t snaps < <(pct listsnapshot {{ ct100_id }} | awk 'NR>1{print $1}')
+        for s in "${snaps[@]}"; do [ -n "$s" ] && pct delsnapshot {{ ct100_id }} "$s" || true; done
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "mp0 entfernen (falls gesetzt) CT{{ ct100_id }}"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        pct set {{ ct100_id }} -mp0 2>/dev/null || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "Defekte unused*-Zeilen ohne VolID bereinigen CT{{ ct100_id }}"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        set -e
+        conf="/etc/pve/nodes/{{ ct100_node }}/lxc/{{ ct100_id }}.conf"
+        [ -f "$conf" ] && sed -i -E '/^unused[0-9]+:\s*$/d' "$conf" || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "CT{{ ct100_id }} zerstören"
+      when: ct100_exists
+      delegate_to: "{{ safe_ct100_node }}"
+      ansible.builtin.shell: |
+        pct destroy {{ ct100_id }} --force 2>/dev/null || true
+      args: { executable: /bin/bash }
+      changed_when: true
+
+    #####################################################################
+    # Löschablauf CT101 (nur wenn vorhanden)
+    #####################################################################
+    - name: "HA-Service CT{{ ct101_id }} entfernen (falls vorhanden)"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        ha-manager config 2>/dev/null | grep -q "ct:{{ ct101_id }}" && ha-manager remove ct:{{ ct101_id }} || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "CT{{ ct101_id }} stoppen (falls läuft)"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        pct status {{ ct101_id }} | grep -q running && pct stop {{ ct101_id }} || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "Alle Snapshots CT{{ ct101_id }} löschen"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        set -e
+        mapfile -t snaps < <(pct listsnapshot {{ ct101_id }} | awk 'NR>1{print $1}')
+        for s in "${snaps[@]}"; do [ -n "$s" ] && pct delsnapshot {{ ct101_id }} "$s" || true; done
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "mp0 entfernen (falls gesetzt) CT{{ ct101_id }}"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        pct set {{ ct101_id }} -mp0 2>/dev/null || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "Defekte unused*-Zeilen ohne VolID bereinigen CT{{ ct101_id }}"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        set -e
+        conf="/etc/pve/nodes/{{ ct101_node }}/lxc/{{ ct101_id }}.conf"
+        [ -f "$conf" ] && sed -i -E '/^unused[0-9]+:\s*$/d' "$conf" || true
+      args: { executable: /bin/bash }
+      changed_when: false
+
+    - name: "CT{{ ct101_id }} zerstören"
+      when: ct101_exists
+      delegate_to: "{{ safe_ct101_node }}"
+      ansible.builtin.shell: |
+        pct destroy {{ ct101_id }} --force 2>/dev/null || true
+      args: { executable: /bin/bash }
+      changed_when: true
