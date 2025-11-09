@@ -1,21 +1,33 @@
-# Lokale Toolboxes
-zamba-lxc-toolbox/
-
-# Python Virtualenvs
-ansible-venv/
-.venv/
-
-# Log- und Backup-Dateien
-*.log
-*.retry
-*.bak
+# General
 *.swp
+*.swo
+*.DS_Store
 *.tmp
+*.bak
+*.log
 
-# Reports & generierte Dateien
+# Python / venv
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+venv/
+/opt/ansible-venv/
+
+# Editor
+.vscode/
+.idea/
+
+# Local reports & artifacts
 ansible/playbooks/reports/
-reports/
+ansible/playbooks/*.retry
 
-# Secrets & lokale Variablen
-ansible/vault_pass.txt
-.env
+# Zamba toolbox (nur Referenz, kein Tracking)
+zamba-lxc-toolbox/
+/root/zamba-lxc-toolbox/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz

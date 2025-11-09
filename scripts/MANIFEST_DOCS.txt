@@ -1,0 +1,12 @@
+# Kanonisches Dokumente-Set (nur diese Dateien sollen existieren)
+# Wenn im Repo andere .md oder alte Dokumente unter /docs liegen,
+# bitte löschen (siehe scripts/cleanup_docs.sh).
+
+ROOT:
+  - README.md
+  - .gitignore
+
+DOCS/:
+  - DOCS_OVERVIEW.md
+  - PLAYBOOK_REFERENCE.md
+  - MAINTENANCE_GUIDE.md

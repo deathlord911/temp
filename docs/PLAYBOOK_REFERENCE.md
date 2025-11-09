@@ -1,69 +1,55 @@
-# Playbook Referenz (01–15)
+# Playbook-Referenz 01–15
+
+> Diese Referenz ist die maßgebliche Beschreibung der Playbooks.
+> Benutze sie zum Verstehen, Ausführen und Debuggen.
 
 ## 01_destroy_old_dcs.yml
-- Entfernt alte DCs, Snapshots, HA-Einträge, defekte Konfigs.
-- Idempotent: ja
-- Output: Cluster ohne CT100/CT101
+- Entfernt alte CTs `100/101` clusterweit (node-aware), inkl. HA, Snapshots, `mp0` & defekter `unused*`-Zeilen.
+- Sicher gegen „nicht gefunden“.
 
 ## 02_create_dc_configs.yml
-- Erzeugt neue Toolbox-Konfigurationen (`/root/zamba-conf/*.conf`)
-- Input: keine
-- Output: zmb-ad.new.conf, zmb-ad-join.new.conf
+- Erzeugt `zmb-ad.conf` und `zmb-ad-join.conf` unter `/root/zamba-conf/`.
 
 ## 03_install_dcs_with_toolbox.yml
-- Automatisierte DC-Erstellung via Toolbox
-- CT100 → raidpool, CT101 → ceph-rbd
-- Prüft Storages & erzwingt Storage-Zuordnung vor Installation
-- Output: Container erzeugt (CTIDs 100/101)
+- Führt Toolbox-Install für `CT100` (zmb-ad, **raidpool**) und `CT101` (zmb-ad-join, **ceph-rbd**).
+- Erkennt Fehlerdialoge der Toolbox (z.B. „Invalid option, exiting...“).
+- Prüft nach Installation, migriert RootFS falls nötig (nur wenn CT vorhanden).
 
 ## 04_upgrade_and_check.yml
-- Führt `apt update/dist-upgrade` aus (noninteractive)
-- Prüft `samba-ad-dc` Status pro CT
+- Non-interactive Apt-Update/Dist-Upgrade (Demo) in beiden CTs.
+- `samba-ad-dc` Status-Tail.
 
 ## 05_cross_dns_and_sysvol.yml
-- DNS & Resolver auf beiden DCs prüfen/setzen
-- Fallback-DNS (1.1.1.1, 9.9.9.9), Suchdomäne
-- Reboot der CTs für sicheren Resolver-Reload
+- Stellt Fallback-DNS/Suchdomäne via `pct set` ein und rebootet CTs.
 
 ## 06_sysvol_sync.yml
-- rsync von CT100→CT101 (Pull auf CT101)
-- Parameter: `sysvol_dry_run=true|false` (Default: true)
-- Installiert automatisch `rsync`/`openssh-client` im Ziel-CT
-- Output: Sync-Log
+- Pull-Sync: CT101 ⟵ CT100 (`/var/lib/samba/sysvol`), per `rsync` via SSH-Key.
+- Dry-Run steuerbar: `-e sysvol_dry_run=true|false`.
 
 ## 07_ad_health_report.yml
-- Prüft Replikation & FSMO-Rollen
-- Output: `reports/ad-health-YYYYMMDD.md`
+- Sammelt DRS/Netlogon/SYSVOL Health und schreibt Report in `reports/`.
 
 ## 08_snapshot_and_upgrade.yml
-- Snapshot + apt Upgrade pro CT
-- Retention: 3 Snapshots
-- Output: `pre-upgrade-YYYYMMDD-HHMMSS`
+- Snapshot-Retention (3), Apt-Update/Upgrade, Tail auf AD-Dienst.
 
 ## 09_ceph_safe_update.yml
-- Installiert ceph-safe-update Script + Timer
-- Startet/Enabelt den Timer
+- Installiert `ceph-safe-update` Script + Timer (deaktiviert WARN-Durchläufe standardmäßig).
 
 ## 10_pve_auto_upgrades_guard.yml
-- Deaktiviert unattended-upgrades (masked) und pve-auto-upgrades (Timer/Service)
-- Stellt sicher, dass ceph-safe-update.timer aktiv ist
+- Deaktiviert/Maskiert `unattended-upgrades` & `pve-auto-upgrades*`, aktiviert ceph-safe Timer.
 
 ## 11_preupdate_health_gate.yml
-- Fail, wenn APT/DPKG busy oder Locks existieren
-- Säubert vorab stale locks
+- Health Gate vor Upgrades: APT/DPKG busy + Locks eliminieren.
 
 ## 12_pre_update_hooks.yml
-- Führt ausführbare Skripte in `./hooks.d` aus (falls vorhanden)
+- Führt lokale Pre-Update Hooks sequentiell aus.
 
 ## 13_post_update_webhook.yml
-- Optionaler Webhook (`-e "webhook_url=..."`)
+- Optionaler Webhook (überspringt ohne URL).
 
 ## 14_ad_backup.yml
-- Samba Online Backup in CT100 (`/backup/samba-ad`)
-- Rotation: keep=7
-- Optionales Rsync-Ziel
+- Online-Backup aus CT100 mit Rotation; optionales Rsync-Ziel.
 
 ## 15_maintenance_verify.yml
-- Health Gate (Ceph, APT, Timer, AD, Backup)
-- Output: `maintenance-*.md`
-- Bricht ab bei „Issues found > 0“ (Gate)
+- Vollständiger Maintenance-Report inkl. Ceph/Timer/Locks/AD/Backups.
+- Failt nur, wenn Issues gefunden wurden (Gate).

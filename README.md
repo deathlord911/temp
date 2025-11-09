@@ -1,33 +1,30 @@
-# Proxmox Zamba AD Deployment & Maintenance mit Ansible
+# Proxmox Zamba – Playbook Suite
 
-Dieses Repository automatisiert die vollständige Bereitstellung, Überprüfung und Wartung
-einer Zamba Active Directory Infrastruktur innerhalb eines Proxmox VE Clusters.
+Diese Repository-Dokumentation ist **kanonisch** (Single Source of Truth) für alle Playbooks `01`–`15`.
+Sie ersetzt ältere, verstreute Dokumente. Alle inhaltlichen Änderungen sollten **nur** hier gepflegt werden.
 
-## Schnellstart
-
-```bash
-cd /root/temp
-./run-all.sh
+## Ordnerstruktur
+```
+/root/temp
+├─ README.md                  # Einstieg & Quickstart
+├─ .gitignore                 # Konsistente Ignorierregeln
+└─ docs/
+   ├─ DOCS_OVERVIEW.md        # Überblick & Betriebsmodell
+   ├─ PLAYBOOK_REFERENCE.md   # Referenz: alle Playbooks 01–15
+   └─ MAINTENANCE_GUIDE.md    # Betrieb, Prüfungen, Troubleshooting
 ```
 
-### Voraussetzungen
-- Cluster: pve1, pve2, pve3
-- Python venv: /opt/ansible-venv
-- Toolbox: /root/zamba-lxc-toolbox
-- Storages: raidpool (CT100) + ceph-rbd (CT101)
-- Ansible ≥ 2.16, Python ≥ 3.10
+## Quickstart
+1. **Dokumente ausrollen** (dieses Paket entpacken) und bestehende Files ersetzen.
+2. **Aufräumen**: `scripts/cleanup_docs.sh` ausführen (entfernt alte/verstreute Docs).
+3. **Committen**:
+   ```bash
+   git add -A
+   git commit -m "docs: replace with canonical docs set and purge legacy files"
+   git push
+   ```
 
-### Struktur
-```text
-ansible/playbooks/01_destroy_old_dcs.yml
-...
-ansible/playbooks/15_maintenance_verify.yml
-```
-
-### Hauptkommandos
-| Ziel | Befehl |
-|------|--------|
-| Vollständiger Lauf | `./run-all.sh` |
-| Einzel-Playbook | `ansible-playbook ansible/playbooks/06_sysvol_sync.yml -e "sysvol_dry_run=false"` |
-
-Weitere Informationen in [`DOCS_OVERVIEW.md`](DOCS_OVERVIEW.md)
+## Warum dieser Schritt?
+- Es existierten **alte, inkonsistente** `.md`-Dateien.
+- Dieses Set ist komplett und deckt **alle Playbooks** ab.
+- Ein Cleanup-Skript entfernt alte Dateien zuverlässig (inkl. `git rm` für getrackte Files).
