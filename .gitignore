@@ -1,33 +1,24 @@
-# General
+# OS/Editor
+.DS_Store
+Thumbs.db
+*~
 *.swp
-*.swo
-*.DS_Store
-*.tmp
-*.bak
-*.log
 
-# Python / venv
+# Python
 __pycache__/
 *.pyc
-*.pyo
 .venv/
 env/
-venv/
-/opt/ansible-venv/
 
-# Editor
-.vscode/
-.idea/
-
-# Local reports & artifacts
+# Ansible Artefakte
+*.retry
 ansible/playbooks/reports/
-ansible/playbooks/*.retry
+ansible/playbooks/*.log
+ansible/playbooks/*.out
+ansible/playbooks/*.bak.*
 
-# Zamba toolbox (nur Referenz, kein Tracking)
-zamba-lxc-toolbox/
-/root/zamba-lxc-toolbox/
+# VS Code
+.vscode/
 
-# Archives
-*.zip
-*.tar
-*.tar.gz
+# Logs
+*.log

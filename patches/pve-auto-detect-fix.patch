@@ -1,0 +1,36 @@
+*** Begin Patch
+*** Update File: ansible/playbooks/15_maintenance_verify.yml
+@@
+-    - name: Check pve-auto-upgrades.timer (exists & enabled?)
+-      ansible.builtin.shell: |
+-        set -e
+-        if systemctl is-enabled pve-auto-upgrades.timer 2>/dev/null | grep -qi enabled; then
+-          echo "ENABLED"
+-        else
+-          echo "DISABLED"
+-        fi
+-      register: pve_auto_timer
+-      changed_when: false
++    - name: Check pve-auto-upgrades.timer (enabled?)
++      ansible.builtin.shell: |
++        systemctl is-enabled pve-auto-upgrades.timer 2>/dev/null || true
++      register: pve_auto_enabled
++      changed_when: false
++
++    - name: Check pve-auto-upgrades.timer (active?)
++      ansible.builtin.shell: |
++        systemctl is-active pve-auto-upgrades.timer 2>/dev/null || true
++      register: pve_auto_active
++      changed_when: false
+@@
+-    - name: Flag if pve-auto-upgrades.timer present and enabled
+-      ansible.builtin.set_fact:
+-        maint_issues: "{{ maint_issues + ['pve-auto-upgrades.timer is enabled (should be disabled)'] }}"
+-      when: pve_auto_timer.stdout | trim == "ENABLED"
++    - name: Flag if pve-auto-upgrades.timer enabled or active
++      ansible.builtin.set_fact:
++        maint_issues: "{{ maint_issues + ['pve-auto-upgrades.timer is enabled/active (should be disabled)'] }}"
++      when: >
++        (pve_auto_enabled.stdout | trim == 'enabled') or
++        (pve_auto_active.stdout  | trim == 'active')
+*** End Patch

@@ -1,0 +1,33 @@
+---
+# includes/find_ct_nodes.yml
+# Ermittelt clusterweit die Config-Pfade der beiden DC-Container
+# und setzt robuste Facts (Existenz + Node-Name), ohne rekursive Defaults.
+
+- name: "Finde CT{{ ct100_id | default(100) }} Configpfad clusterweit"
+  ansible.builtin.shell: |
+    set -e
+    ls -1 /etc/pve/nodes/*/lxc/{{ ct100_id | default(100) }}.conf 2>/dev/null || true
+  args: { executable: /bin/bash }
+  register: _inc_conf100
+  changed_when: false
+
+- name: "Finde CT{{ ct101_id | default(101) }} Configpfad clusterweit"
+  ansible.builtin.shell: |
+    set -e
+    ls -1 /etc/pve/nodes/*/lxc/{{ ct101_id | default(101) }}.conf 2>/dev/null || true
+  args: { executable: /bin/bash }
+  register: _inc_conf101
+  changed_when: false
+
+- name: Setze Node-Facts (leer falls nicht vorhanden)
+  ansible.builtin.set_fact:
+    ct100_confpath: "{{ _inc_conf100.stdout | trim }}"
+    ct101_confpath: "{{ _inc_conf101.stdout | trim }}"
+    ct100_exists: "{{ (_inc_conf100.stdout | trim | length) > 0 }}"
+    ct101_exists: "{{ (_inc_conf101.stdout | trim | length) > 0 }}"
+    ct100_node: >-
+      {{ ((_inc_conf100.stdout | trim | length) > 0)
+         | ternary(( _inc_conf100.stdout | trim ).split('/')[-3], '') }}
+    ct101_node: >-
+      {{ ((_inc_conf101.stdout | trim | length) > 0)
+         | ternary(( _inc_conf101.stdout | trim ).split('/')[-3], '') }}

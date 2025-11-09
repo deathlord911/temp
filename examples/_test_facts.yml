@@ -1,0 +1,15 @@
+---
+- name: Test facts
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - include_tasks: includes/find_ct_nodes.yml
+
+    # Fallbacks hart setzen, falls leer (wichtig gegen "Empty hostname")
+    - name: Normalize ct*_node fallbacks
+      set_fact:
+        ct100_node: "{{ ct100_node | default(inventory_hostname, true) | default('localhost', true) }}"
+        ct101_node: "{{ ct101_node | default(inventory_hostname, true) | default('localhost', true) }}"
+
+    - debug: var=ct100_node
+    - debug: var=ct101_node
